@@ -1,49 +1,42 @@
-<<<<<<< HEAD
-.env
+# --- secrets ---
+.env*
+!.env.example
+
+# --- Python ---
+venv/
+__pycache__/
+*.pyc
+
+# --- data (local only) ---
 kicd_chroma_db/
 *.docx
-=======
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+files.zip
 
-# dependencies
-/node_modules
-/.pnp
+# --- Node / Next.js (frontend/) ---
+node_modules/
+.next/
+out/
+build/
+coverage/
+frontend/temp_next/
+.pnp
 .pnp.*
 .yarn/*
 !.yarn/patches
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
+*.tsbuildinfo
+next-env.d.ts
+.vercel
 
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
-.DS_Store
-*.pem
-
-# debug
+# --- logs / OS ---
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+.DS_Store
+*.pem
 
-# env files (can opt-in for committing if needed)
-.env*
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-
-node_modules/
->>>>>>> b6e973dd31174442ba255c4b92f577373809b413
+# --- local tooling (optional) ---
+.claude/
