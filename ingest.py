@@ -51,6 +51,8 @@ load_dotenv()
 
 import chromadb
 from gemini_embedding import GeminiEmbeddingFunction
+from bedrock_embedding import BedrockEmbeddingFunction
+
 
 DOCLING_JSON_DIR = Path("docling_json")
 CHROMA_DB_PATH = "./kicd_chroma_db"
@@ -270,11 +272,19 @@ def build_chunks(grade: str, subject: str, source_file: str, curriculum_rows: li
 
 
 def main():
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("GEMINI_API_KEY not set. Check your .env file has GEMINI_API_KEY=... "
-              "(no quotes) and that ingest.py is in the same folder as .env.")
-        sys.exit(1)
+    aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    aws_region = os.environ.get("AWS_REGION", "us-east-1")
+
+    if aws_access_key or os.environ.get("AWS_PROFILE") or os.environ.get("AWS_DEFAULT_REGION"):
+        print(f"Using AWS Bedrock embedding function (Region: {aws_region})")
+        ef = BedrockEmbeddingFunction(region_name=aws_region)
+    elif gemini_key:
+        print("Using Google Gemini embedding function")
+        ef = GeminiEmbeddingFunction(api_key=gemini_key)
+    else:
+        print("Using AWS Bedrock embedding function (Default boto3 credential chain)")
+        ef = BedrockEmbeddingFunction(region_name=aws_region)
 
     if not DOCLING_JSON_DIR.exists():
         print(f"'{DOCLING_JSON_DIR}' not found. Put your Docling JSON exports there.")
@@ -318,11 +328,11 @@ def main():
     print(f"\nTotal chunks to ingest: {len(all_chunks)}")
 
     client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-    gemini_ef = GeminiEmbeddingFunction(api_key=api_key)
     collection = client.get_or_create_collection(
         name=COLLECTION_NAME,
-        embedding_function=gemini_ef,
+        embedding_function=ef,
     )
+
 
     batch_size = 20
     for i in range(0, len(all_chunks), batch_size):
@@ -334,7 +344,7 @@ def main():
         )
         print(f"  Upserted {i + len(batch)}/{len(all_chunks)}")
 
-        time.sleep(15)
+        time.sleep(0.5)
 
     print(f"\nDone. Collection '{COLLECTION_NAME}' now has {collection.count()} chunk(s) "
           f"stored at {CHROMA_DB_PATH}")
