@@ -1,21 +1,33 @@
 import os
 import re
+import json
 import warnings
 import chromadb
+import boto3
 from dotenv import load_dotenv
 from strands import Agent
 from strands.models.gemini import GeminiModel
 
 from backend.plain_text import to_plain_text
+from bedrock_embedding import BedrockEmbeddingFunction
 from gemini_embedding import GeminiEmbeddingFunction
 from models import DailyLessonContent, LessonPlan, SchemeOfWork, TermPlanContent
 from doc_generator import create_lesson_plan_docx, create_scheme_of_work_docx
 
 # 1. Load environment variables
 load_dotenv()
-api_key = os.environ.get("GEMINI_API_KEY")
-if not api_key:
-    raise ValueError("GEMINI_API_KEY is missing. Check your .env file.")
+gemini_key = os.environ.get("GEMINI_API_KEY")
+aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+aws_region = os.environ.get("AWS_REGION", "us-east-1")
+bedrock_model_id = os.environ.get("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20240620-v1:0")
+aws_configured = (
+    aws_access_key
+    or os.environ.get("AWS_PROFILE")
+    or os.environ.get("AWS_DEFAULT_REGION")
+    or os.environ.get("BEDROCK_MODEL_ID")
+)
+use_bedrock = bool(aws_configured or not gemini_key)
 
 # Agent.structured_output is deprecated in favour of structured_output_model on a normal
 # invocation, but that path runs the agent loop with an output tool. These functions must
@@ -60,15 +72,49 @@ class GroundedGeminiModel(GeminiModel):
         yield {"output": output_model.model_validate_json(response.text)}
 
 
-# 2. Initialize the shared Gemini model
-gemini_model = GroundedGeminiModel(
-    client_args={"api_key": api_key},
-    model_id="gemini-3.1-flash-lite",
-    params={"temperature": 0.2},
-)
+# 2. Initialize selected provider
+if use_bedrock:
+    print(f"Using AWS Bedrock provider (Region: {aws_region}, Model: {bedrock_model_id})")
+    bedrock_client = boto3.client(
+        service_name="bedrock-runtime",
+        region_name=aws_region,
+        aws_access_key_id=aws_access_key,
+        aws_secret_access_key=aws_secret_key,
+        aws_session_token=os.environ.get("AWS_SESSION_TOKEN"),
+    )
+    gemini_model = None
+else:
+    gemini_model = GroundedGeminiModel(
+        client_args={"api_key": gemini_key},
+        model_id="gemini-3.1-flash-lite",
+        params={"temperature": 0.2},
+    )
 
 
 def _structured_output(output_model, system_instruction: str, contents: str):
+    if use_bedrock:
+        json_system_prompt = f"""{system_instruction}
+
+CRITICAL: Return ONLY valid JSON matching this exact JSON schema:
+{json.dumps(output_model.model_json_schema(), indent=2)}
+
+Do NOT include any introduction, conversational text, or markdown code block markers (like ```json).
+"""
+        response = bedrock_client.converse(
+            modelId=bedrock_model_id,
+            messages=[{"role": "user", "content": [{"text": contents}]}],
+            system=[{"text": json_system_prompt}],
+            inferenceConfig={
+                "temperature": 0.2,
+                "maxTokens": 4096,
+            },
+        )
+        raw_text = response["output"]["message"]["content"][0]["text"]
+        cleaned_text = re.sub(r"^```json\s*", "", raw_text.strip(), flags=re.MULTILINE)
+        cleaned_text = re.sub(r"^```\s*", "", cleaned_text.strip(), flags=re.MULTILINE)
+        cleaned_text = cleaned_text.rstrip("`").strip()
+        return output_model.model_validate_json(cleaned_text)
+
     # A fresh Agent per call: the system prompt differs per request, and a shared Agent's
     # prompt would race between concurrent API requests. No tools are ever registered.
     agent = Agent(model=gemini_model, system_prompt=system_instruction, callback_handler=None)
@@ -81,6 +127,9 @@ def _is_recitation(exc: GeminiNoContentError) -> bool:
 
 def _structured_output_with_recitation_retry(output_model, system_instruction: str,
                                              request: str, retry_request: str):
+    if use_bedrock:
+        return _structured_output(output_model, system_instruction, request)
+
     # Gemini blocks near-verbatim copies of published text (finish_reason RECITATION),
     # which KICD designs are; a retry asking for rewording stays grounded but passes.
     try:
@@ -96,7 +145,10 @@ CHROMA_DB_PATH = "kicd_chroma_db"
 COLLECTION_NAME = "kicd_curriculum"
 
 db_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-gemini_ef = GeminiEmbeddingFunction(api_key=api_key)
+if use_bedrock:
+    gemini_ef = BedrockEmbeddingFunction(region_name=aws_region)
+else:
+    gemini_ef = GeminiEmbeddingFunction(api_key=gemini_key)
 collection = db_client.get_collection(
     name=COLLECTION_NAME,
     embedding_function=gemini_ef,
@@ -293,11 +345,25 @@ def generate_reflection_summary(evidence: dict[str, str]) -> str:
         f"[{label}]\n{notes[field] or '(left blank)'}" for field, label in REFLECTION_EVIDENCE_LABELS.items()
     )
 
-    # A fresh tool-free Agent per call on the shared model, like the other generation functions.
-    agent = Agent(model=gemini_model, system_prompt=REFLECTION_SUMMARY_PERSONA, callback_handler=None)
-    result = agent(f"Summarise these reflection notes for the teacher.\n\n{notes_text}")
+    request = f"Summarise these reflection notes for the teacher.\n\n{notes_text}"
 
-    summary = _drop_status_sentences(to_plain_text(str(result)))
+    if use_bedrock:
+        # Plain-text counterpart of _structured_output's Bedrock path: the persona is the system
+        # prompt and the text comes back as-is, with no JSON schema wrapping.
+        response = bedrock_client.converse(
+            modelId=bedrock_model_id,
+            messages=[{"role": "user", "content": [{"text": request}]}],
+            system=[{"text": REFLECTION_SUMMARY_PERSONA}],
+            inferenceConfig={"temperature": 0.2, "maxTokens": 1024},
+        )
+        raw_summary = response["output"]["message"]["content"][0]["text"]
+    else:
+        # A fresh tool-free Agent per call on the shared model, like the other generation functions.
+        agent = Agent(model=gemini_model, system_prompt=REFLECTION_SUMMARY_PERSONA, callback_handler=None)
+        raw_summary = str(agent(request))
+
+    # Applied whichever provider answered: the achievement-language rule is never provider-specific.
+    summary = _drop_status_sentences(to_plain_text(raw_summary))
     if not summary:
         raise RuntimeError("Every sentence of the summary judged the outcome, so none of it was kept.")
     return summary
