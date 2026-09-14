@@ -62,9 +62,6 @@ export function SourceDrawer({
           <div className="flex flex-col gap-2">
             <div className="flex flex-wrap items-center gap-2">
               <OfficialEvidenceBadge />
-              <span className="rounded-full bg-neutral-500/10 px-2.5 py-1 text-xs font-medium text-muted-foreground">
-                Prototype data
-              </span>
             </div>
             <h2 className="text-lg font-semibold leading-snug text-neutral-950">{item.designTitle}</h2>
             <p className="text-sm text-muted-foreground">

@@ -16,7 +16,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { PrototypeBadge } from "@/components/Provenance";
 import { formatContext, useTeachingContext } from "@/context/TeachingContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
 import { academicYears, classes, grades, subjects, terms } from "@/data/mockData";
@@ -60,10 +59,6 @@ export default function SetupPage() {
           <span className="text-sm font-semibold text-neutral-900">CBC Teacher Workflow</span>
           <span className="text-xs text-muted-foreground">KICD-aligned workspace</span>
         </div>
-      </div>
-
-      <div className="absolute right-6 top-6 md:right-8 md:top-8">
-        <PrototypeBadge />
       </div>
 
       <Card className="w-full max-w-2xl overflow-hidden bg-white shadow-sm">

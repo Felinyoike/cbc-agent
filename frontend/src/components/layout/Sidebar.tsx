@@ -7,7 +7,6 @@ import {
   Calendar,
   CheckCircle,
   FileText,
-  FlaskConical,
   Home,
   Library,
   Sprout,
@@ -66,16 +65,6 @@ export function Sidebar() {
           );
         })}
       </nav>
-
-      <div className="mt-auto flex flex-col gap-2 rounded-lg border border-border bg-white p-3">
-        <div className="flex items-center gap-2">
-          <FlaskConical className="size-3.5 text-muted-foreground" />
-          <span className="text-xs font-medium text-neutral-950">Prototype · Mock data</span>
-        </div>
-        <p className="text-[11px] leading-snug text-muted-foreground">
-          Screens are not connected to live KICD data.
-        </p>
-      </div>
     </aside>
   );
 }
