@@ -12,7 +12,7 @@ from datetime import date
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg2 import errors as pg_errors
 from psycopg2.extras import Json
@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from backend.chroma import collection
 from backend.db import connection as db
+from backend.documents import DOCX_MEDIA_TYPE, generate_lesson_docx, generate_scheme_docx, safe_filename
 from backend.search import SearchFailed, search_evidence
 
 logging.basicConfig(level=logging.INFO)
@@ -239,7 +240,8 @@ def update_lesson(lesson_id: UUID, body: LessonUpdate):
     _require_db()
     with db.get_cursor() as cur:
         cur.execute(
-            """UPDATE lesson_plans SET content = %s, lesson_date = COALESCE(%s, lesson_date)
+            """UPDATE lesson_plans SET content = %s, lesson_date = COALESCE(%s, lesson_date),
+                                       updated_at = CURRENT_TIMESTAMP
                WHERE id = %s RETURNING *""",
             (Json(body.content), body.lesson_date, str(lesson_id)),
         )
@@ -265,7 +267,7 @@ def confirm_lesson(lesson_id: UUID):
     _require_db()
     with db.get_cursor() as cur:
         cur.execute(
-            "UPDATE lesson_plans SET status = 'confirmed' WHERE id = %s RETURNING *",
+            "UPDATE lesson_plans SET status = 'confirmed', updated_at = CURRENT_TIMESTAMP WHERE id = %s RETURNING *",
             (str(lesson_id),),
         )
         row = cur.fetchone()
@@ -277,6 +279,98 @@ def confirm_lesson(lesson_id: UUID):
             (str(lesson_id), db.demo_user_id),
         )
     return row
+
+
+# ---------------------------------------------------------------------------
+# Word downloads and the library of confirmed work (Postgres)
+# ---------------------------------------------------------------------------
+
+def _fetch_one(sql: str, params: tuple):
+    with db.get_cursor() as cur:
+        cur.execute(sql, params)
+        return cur.fetchone()
+
+
+def _docx_response(content: bytes, filename: str) -> Response:
+    return Response(content=content, media_type=DOCX_MEDIA_TYPE,
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/schemes/{scheme_id}/download")
+def download_scheme(scheme_id: UUID):
+    _require_db()
+    scheme = _fetch_one("SELECT * FROM schemes_of_work WHERE id = %s", (str(scheme_id),))
+    if scheme is None:
+        raise HTTPException(status_code=404, detail="Scheme not found")
+    filename = safe_filename("Scheme_of_Work", scheme["subject"], scheme["grade"],
+                             f"Term_{scheme['term']}", scheme["year"])
+    return _docx_response(generate_scheme_docx(scheme), filename)
+
+
+@app.get("/api/lessons/{lesson_id}/download")
+def download_lesson(lesson_id: UUID):
+    _require_db()
+    lesson = _fetch_one("SELECT * FROM lesson_plans WHERE id = %s", (str(lesson_id),))
+    if lesson is None:
+        raise HTTPException(status_code=404, detail="Lesson plan not found")
+    # An unlinked lesson is valid: the document just has no grade/subject/term context.
+    scheme = (_fetch_one("SELECT * FROM schemes_of_work WHERE id = %s", (str(lesson["scheme_id"]),))
+              if lesson["scheme_id"] else None)
+    # Same date the document header shows: the draft's own date, falling back to the column.
+    lesson_date = (lesson["content"] or {}).get("date") or lesson["lesson_date"]
+    filename = safe_filename("Lesson_Plan", lesson["sub_strand"], lesson_date)
+    return _docx_response(generate_lesson_docx(lesson, scheme), filename)
+
+
+@app.get("/api/library")
+def library():
+    """Confirmed schemes and lesson plans only, most recently updated first."""
+    _require_db()
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id, grade, subject, term, year, updated_at, content
+               FROM schemes_of_work WHERE status = 'confirmed'"""
+        )
+        schemes = cur.fetchall()
+        cur.execute(
+            """SELECT l.id, l.sub_strand, l.updated_at, l.content,
+                      s.grade, s.subject, s.term, s.year
+               FROM lesson_plans l LEFT JOIN schemes_of_work s ON s.id = l.scheme_id
+               WHERE l.status = 'confirmed'"""
+        )
+        lessons = cur.fetchall()
+
+    items = []
+    for scheme in schemes:
+        rows = (scheme["content"] or {}).get("rows") or []
+        items.append({
+            "id": str(scheme["id"]),
+            "type": "Scheme of Work",
+            "title": f"{scheme['subject']} scheme of work",
+            "grade": scheme["grade"],
+            "subject": scheme["subject"],
+            "term": scheme["term"],
+            "year": scheme["year"],
+            "updatedAt": scheme["updated_at"],
+            "evidenceCount": len({eid for row in rows for eid in row.get("evidenceIds") or []}),
+        })
+    for lesson in lessons:
+        items.append({
+            "id": str(lesson["id"]),
+            "type": "Lesson Plan",
+            "title": ((lesson["content"] or {}).get("title") or "").strip() or lesson["sub_strand"],
+            # Null when the lesson was never linked to a saved scheme.
+            "grade": lesson["grade"],
+            "subject": lesson["subject"],
+            "term": lesson["term"],
+            "year": lesson["year"],
+            "updatedAt": lesson["updated_at"],
+            # LessonPlanDraft carries no evidence ids, so no count is reported.
+            "evidenceCount": None,
+        })
+
+    items.sort(key=lambda item: item["updatedAt"], reverse=True)
+    return {"items": items}
 
 
 # ---------------------------------------------------------------------------

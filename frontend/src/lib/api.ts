@@ -139,6 +139,34 @@ export function askAssistant(prompt: string, grade: string, subject: string, evi
   });
 }
 
+/** A confirmed scheme or lesson plan, as stored in Postgres. */
+export interface LibraryEntry {
+  id: string;
+  type: "Scheme of Work" | "Lesson Plan";
+  title: string;
+  /** Null for a lesson plan that was never linked to a saved scheme. */
+  grade: string | null;
+  subject: string | null;
+  term: number | null;
+  year: number | null;
+  updatedAt: string;
+  /** Distinct evidence cited by a scheme's rows; null for lesson plans, which carry no evidence ids. */
+  evidenceCount: number | null;
+}
+
+export function getLibrary(signal?: AbortSignal) {
+  return requestJson<{ items: LibraryEntry[] }>("/api/library", { signal });
+}
+
+/** Plain URLs for `<a href>`: the API streams the .docx with a download filename. */
+export function schemeDownloadUrl(id: string) {
+  return `${BASE_URL}/api/schemes/${id}/download`;
+}
+
+export function lessonDownloadUrl(id: string) {
+  return `${BASE_URL}/api/lessons/${id}/download`;
+}
+
 export interface Scheme {
   id: string;
   user_id: string;

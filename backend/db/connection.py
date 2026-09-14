@@ -36,6 +36,9 @@ def init_db() -> None:
         with get_cursor() as cur:
             # The full LessonPlanDraft lives here; the narrow TEXT[] columns have no room for it.
             cur.execute("ALTER TABLE lesson_plans ADD COLUMN IF NOT EXISTS content JSONB")
+            # The library orders by last update; lesson writes set this explicitly.
+            cur.execute("ALTER TABLE lesson_plans ADD COLUMN IF NOT EXISTS updated_at "
+                        "TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP")
             cur.execute("SELECT id FROM users WHERE email = %s", (DEMO_USER_EMAIL,))
             row = cur.fetchone()
             if row is None:

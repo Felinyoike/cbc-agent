@@ -3,7 +3,18 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, ArrowLeft, CheckCircle2, FileSearch, Loader2, PenLine, Save, Sparkles, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  Download,
+  FileSearch,
+  Loader2,
+  PenLine,
+  Save,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ConfirmationDialog, DiscardDialog } from "@/components/ConfirmationDialog";
@@ -12,13 +23,20 @@ import { AiBadge, DraftBadge, OfficialEvidenceBadge, SourceTag, TeacherInputBadg
 import { useTeachingContext } from "@/context/TeachingContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
 import type { EvidenceItem } from "@/data/mockData";
-import { describeApiError } from "@/lib/api";
+import { describeApiError, schemeDownloadUrl } from "@/lib/api";
 
 export default function TermPlanReviewPage() {
   const router = useRouter();
   const context = useTeachingContext();
-  const { termPlanRows, generatedRowContent, confirmTermPlan, discardTermPlan, termPlanConfirmed, evidenceById } =
-    useWorkspace();
+  const {
+    termPlanRows,
+    generatedRowContent,
+    confirmTermPlan,
+    discardTermPlan,
+    termPlanConfirmed,
+    evidenceById,
+    currentSchemeId,
+  } = useWorkspace();
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
@@ -246,11 +264,11 @@ export default function TermPlanReviewPage() {
           <div className="flex items-start gap-3 rounded-lg border border-brand-border bg-brand-softer px-4 py-3">
             <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-brand-strong" />
             <p className="text-sm text-brand-ink">
-              Confirmed and saved to{" "}
+              Confirmed — view it in{" "}
               <Link href="/library" className="font-medium underline underline-offset-2">
                 My Library
-              </Link>{" "}
-              as your teacher work product.
+              </Link>
+              .
             </p>
           </div>
         )}
@@ -271,6 +289,20 @@ export default function TermPlanReviewPage() {
             <Save className="size-4" />
             Keep as draft
           </Button>
+          {/* Only a saved scheme exists on the server to download. */}
+          {currentSchemeId ? (
+            <Button variant="outline" asChild className="gap-2">
+              <a href={schemeDownloadUrl(currentSchemeId)}>
+                <Download className="size-4" />
+                Download
+              </a>
+            </Button>
+          ) : (
+            <Button variant="outline" disabled className="gap-2" title="Save or confirm the term plan first">
+              <Download className="size-4" />
+              Download
+            </Button>
+          )}
           <Button
             variant="outline"
             onClick={() => setDiscardOpen(true)}

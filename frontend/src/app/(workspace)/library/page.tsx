@@ -1,38 +1,72 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { CheckCircle2, ClipboardCheck, FileText, Library as LibraryIcon, ShieldCheck } from "lucide-react";
+import {
+  AlertTriangle,
+  ClipboardCheck,
+  Download,
+  FileText,
+  Library as LibraryIcon,
+  Loader2,
+  ShieldCheck,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ConfirmedBadge, DraftBadge } from "@/components/Provenance";
 import { useWorkspace } from "@/context/WorkspaceContext";
-import type { LibraryItem } from "@/data/mockData";
+import {
+  describeApiError,
+  getLibrary,
+  lessonDownloadUrl,
+  schemeDownloadUrl,
+  type LibraryEntry,
+} from "@/lib/api";
 
 const typeIcons = {
   "Scheme of Work": FileText,
   "Lesson Plan": ClipboardCheck,
-  Reflection: CheckCircle2,
 } as const;
 
-const filters = ["All", "Scheme of Work", "Lesson Plan", "Reflection"] as const;
+const filters = ["All", "Scheme of Work", "Lesson Plan"] as const;
 
 export default function LibraryPage() {
-  const { library, termPlanConfirmed, lessonPlanConfirmed, termPlanRows, reflections } = useWorkspace();
+  const { termPlanConfirmed, lessonPlanConfirmed, termPlanRows, lessonPlan, reflections } = useWorkspace();
   const [filter, setFilter] = useState<(typeof filters)[number]>("All");
+  const [items, setItems] = useState<LibraryEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  /* The library is whatever Postgres holds as confirmed -- never local session state. */
+  useEffect(() => {
+    const controller = new AbortController();
+    getLibrary(controller.signal)
+      .then(({ items }) => setItems(items))
+      .catch((err) => {
+        if (!controller.signal.aborted) setError(describeApiError(err));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
 
   const filtered = useMemo(
-    () => (filter === "All" ? library : library.filter((item) => item.type === filter)),
-    [library, filter]
+    () => (filter === "All" ? items : items.filter((item) => item.type === filter)),
+    [items, filter]
   );
+
+  const lessonHasContent =
+    lessonPlan.development.some((step) => step.trim()) ||
+    Object.entries(lessonPlan).some(([key, value]) => key !== "development" && typeof value === "string" && value.trim());
 
   /* Drafts live in their own area — the library only holds confirmed work. */
   const openDrafts = [
     !termPlanConfirmed && termPlanRows.some((row) => row.status === "draft")
-      ? { href: "/term-plans", label: "Term 1 scheme of work", detail: "Unconfirmed teacher draft" }
+      ? { href: "/term-plans", label: "Term plan", detail: "Unconfirmed teacher draft" }
       : null,
-    !lessonPlanConfirmed
-      ? { href: "/daily-lessons/plan", label: "Soil Conservation — Lesson 4", detail: "Unconfirmed lesson draft" }
+    !lessonPlanConfirmed && lessonHasContent
+      ? { href: "/daily-lessons/plan", label: lessonPlan.title.trim() || "Daily lesson plan", detail: "Unconfirmed lesson draft" }
       : null,
     ...reflections
       .filter((record) => record.status === "draft")
@@ -67,26 +101,39 @@ export default function LibraryPage() {
             {option === "All" ? "All artifacts" : `${option}s`}
           </button>
         ))}
-        <span className="ml-auto text-sm text-muted-foreground">
-          {filtered.length} confirmed {filtered.length === 1 ? "artifact" : "artifacts"}
-        </span>
+        {!loading && !error && (
+          <span className="ml-auto text-sm text-muted-foreground">
+            {filtered.length} confirmed {filtered.length === 1 ? "artifact" : "artifacts"}
+          </span>
+        )}
       </div>
 
-      {filtered.length === 0 ? (
+      {loading ? (
+        <div role="status" className="flex items-center gap-2 rounded-xl border border-border bg-white px-4 py-6 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" />
+          Loading your confirmed work…
+        </div>
+      ) : error ? (
+        <div role="alert" className="flex items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-3">
+          <AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" />
+          <p className="text-sm text-destructive">Could not load your library. {error}</p>
+        </div>
+      ) : filtered.length === 0 ? (
         <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-border bg-white py-16 text-center">
           <div className="flex size-12 items-center justify-center rounded-full bg-neutral-100">
             <LibraryIcon className="size-5 text-muted-foreground" />
           </div>
-          <p className="text-sm font-medium">Nothing confirmed in this category yet</p>
+          <p className="text-sm font-medium">
+            {items.length === 0 ? "Nothing confirmed yet" : "Nothing confirmed in this category yet"}
+          </p>
           <p className="max-w-sm text-xs text-muted-foreground">
-            Work reaches your library only after you review a draft and confirm it as your teacher work
-            product.
+            Schemes and lesson plans you confirm will appear here.
           </p>
         </div>
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
           {filtered.map((item) => (
-            <LibraryCard key={item.id} item={item} />
+            <LibraryCard key={`${item.type}-${item.id}`} item={item} />
           ))}
         </div>
       )}
@@ -121,8 +168,12 @@ export default function LibraryPage() {
   );
 }
 
-function LibraryCard({ item }: { item: LibraryItem }) {
+function LibraryCard({ item }: { item: LibraryEntry }) {
   const Icon = typeIcons[item.type];
+  const context = [item.grade, item.subject].filter(Boolean).join(" · ");
+  const term = item.term ? `Term ${item.term}${item.year ? ` ${item.year}` : ""}` : "";
+  const href = item.type === "Scheme of Work" ? schemeDownloadUrl(item.id) : lessonDownloadUrl(item.id);
+
   return (
     <Card className="gap-3 p-5">
       <CardContent className="gap-3 p-0">
@@ -140,18 +191,26 @@ function LibraryCard({ item }: { item: LibraryItem }) {
         </div>
 
         <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
-          <Meta label="Context" value={`${item.grade} · ${item.subject}`} />
-          <Meta label="Term / class" value={`${item.term} · ${item.className}`} />
-          <Meta label="Last updated" value={formatDate(item.updated)} />
-          <Meta label="Version" value={item.version} />
+          <Meta label="Context" value={context || "Not linked to a saved scheme"} />
+          <Meta label="Term" value={term || "—"} />
+          <Meta label="Last updated" value={formatDate(item.updatedAt)} />
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
-          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-            <ShieldCheck className="size-3.5" />
-            {item.evidenceCount} evidence {item.evidenceCount === 1 ? "item" : "items"} · KICD design{" "}
-            {item.pages.length ? `page${item.pages.length > 1 ? "s" : ""} ${item.pages.join(", ")}` : "—"}
-          </span>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
+          {item.evidenceCount !== null ? (
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <ShieldCheck className="size-3.5" />
+              {item.evidenceCount} evidence {item.evidenceCount === 1 ? "item" : "items"} cited
+            </span>
+          ) : (
+            <span />
+          )}
+          <Button variant="outline" size="sm" asChild className="gap-1.5">
+            <a href={href}>
+              <Download className="size-3.5" />
+              Download
+            </a>
+          </Button>
         </div>
       </CardContent>
     </Card>
@@ -168,9 +227,5 @@ function Meta({ label, value }: { label: string; value: string }) {
 }
 
 function formatDate(value: string) {
-  return new Date(`${value}T00:00:00`).toLocaleDateString("en-GB", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
+  return new Date(value).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }

@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS lesson_plans (
     resources TEXT[],
     content JSONB,
     status TEXT DEFAULT 'draft',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 5. Post-Lesson Evaluation Records

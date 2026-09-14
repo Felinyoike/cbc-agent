@@ -16,11 +16,9 @@ import {
   emptyLessonPlan,
   initialLessons,
   initialReflections,
-  libraryItems as seedLibrary,
   type EvidenceItem,
   type LessonPlanDraft,
   type Lesson,
-  type LibraryItem,
   type OutcomeStatus,
   type ReflectionRecord,
   type TermPlanRow,
@@ -79,7 +77,6 @@ interface WorkspaceState {
   hasReflectionEvidence: (id: string) => boolean;
   confirmReflection: (id: string) => boolean;
 
-  library: LibraryItem[];
   pendingReflectionCount: number;
   draftCount: number;
 
@@ -115,7 +112,6 @@ interface PersistedShape {
   generatedLessonContent?: GeneratedLessonContent;
   currentLessonId: string | null;
   reflections: ReflectionRecord[];
-  library: LibraryItem[];
   lessons: Lesson[];
 }
 
@@ -134,7 +130,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [generatedLessonContent, setGeneratedLessonContent] = useState<GeneratedLessonContent | undefined>();
   const [currentLessonId, setCurrentLessonId] = useState<string | null>(null);
   const [reflections, setReflections] = useState<ReflectionRecord[]>(initialReflections);
-  const [library, setLibrary] = useState<LibraryItem[]>(seedLibrary);
   const [contextWarning, setContextWarning] = useState<string | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
 
@@ -161,7 +156,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         if (parsed.generatedLessonContent) setGeneratedLessonContent(parsed.generatedLessonContent);
         if (parsed.currentLessonId !== undefined) setCurrentLessonId(parsed.currentLessonId);
         if (parsed.reflections) setReflections(parsed.reflections);
-        if (parsed.library) setLibrary(parsed.library);
         if (parsed.lessons) setLessons(parsed.lessons);
         /* eslint-enable react-hooks/set-state-in-effect */
       }
@@ -187,7 +181,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         generatedLessonContent,
         currentLessonId,
         reflections,
-        library,
         lessons,
       };
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -208,7 +201,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     generatedLessonContent,
     currentLessonId,
     reflections,
-    library,
     lessons,
   ]);
 
@@ -319,40 +311,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     const schemeId = await persistScheme(confirmedRows);
     await confirmScheme(schemeId);
 
+    // The Library reads confirmed schemes from Postgres, so nothing is recorded locally here.
     setTermPlanConfirmed(true);
     setTermPlanRows(confirmedRows);
-    const citedIds = new Set(confirmedRows.flatMap((row) => row.evidenceIds));
-    setLibrary((prev) => [
-      {
-        id: `lib-${Date.now()}`,
-        type: "Scheme of Work",
-        title: `${teaching.subject} — ${teaching.term} scheme of work`,
-        grade: teaching.grade,
-        subject: teaching.subject,
-        term: teaching.term,
-        className: teaching.className,
-        updated: new Date().toISOString().slice(0, 10),
-        version: "v1",
-        evidenceCount: citedIds.size,
-        pages: Array.from(
-          new Set(
-            Array.from(citedIds)
-              .map((id) => evidenceById[id]?.page)
-              .filter((page): page is number => typeof page === "number")
-          )
-        ).sort((a, b) => a - b),
-      },
-      ...prev,
-    ]);
-  }, [
-    termPlanRows,
-    persistScheme,
-    evidenceById,
-    teaching.grade,
-    teaching.subject,
-    teaching.term,
-    teaching.className,
-  ]);
+  }, [termPlanRows, persistScheme]);
 
   const discardTermPlan = useCallback(() => {
     setTermPlanRows([]);
@@ -434,41 +396,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     const lessonId = await persistLesson(lessonPlan);
     await confirmLesson(lessonId);
 
+    // The Library reads confirmed lesson plans from Postgres, so nothing is recorded locally here.
     setLessonPlanConfirmed(true);
-    const row = selectedTermPlanRow;
-    const citedIds = row?.evidenceIds ?? [];
-    setLibrary((prev) => [
-      {
-        id: `lib-${Date.now()}`,
-        type: "Lesson Plan",
-        title: lessonPlan.title.trim() || (row ? `${row.subStrand} — Week ${row.week}` : "Daily lesson plan"),
-        grade: teaching.grade,
-        subject: teaching.subject,
-        term: teaching.term,
-        className: teaching.className,
-        updated: new Date().toISOString().slice(0, 10),
-        version: "v1",
-        evidenceCount: citedIds.length,
-        pages: Array.from(
-          new Set(
-            citedIds
-              .map((id) => evidenceById[id]?.page)
-              .filter((page): page is number => typeof page === "number")
-          )
-        ).sort((a, b) => a - b),
-      },
-      ...prev,
-    ]);
-  }, [
-    persistLesson,
-    lessonPlan,
-    selectedTermPlanRow,
-    evidenceById,
-    teaching.grade,
-    teaching.subject,
-    teaching.term,
-    teaching.className,
-  ]);
+  }, [persistLesson, lessonPlan]);
 
   const discardLessonPlan = useCallback(() => {
     setLessonPlan(emptyLessonPlan);
@@ -522,22 +452,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       setLessons((prev) =>
         prev.map((lesson) => (lesson.id === record.lessonId ? { ...lesson, status: "reflected" } : lesson))
       );
-      setLibrary((prev) => [
-        {
-          id: `lib-${Date.now()}`,
-          type: "Reflection",
-          title: `Reflection — ${record.lessonTitle}`,
-          grade: "Grade 5",
-          subject: "Agriculture",
-          term: "Term 1",
-          className: "5 East",
-          updated: new Date().toISOString().slice(0, 10),
-          version: "v1",
-          evidenceCount: 1,
-          pages: [13],
-        },
-        ...prev,
-      ]);
       return true;
     },
     [reflections]
@@ -589,7 +503,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setOutcomeStatus,
     hasReflectionEvidence,
     confirmReflection,
-    library,
     pendingReflectionCount,
     draftCount,
     contextWarning,

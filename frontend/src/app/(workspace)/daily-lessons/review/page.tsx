@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
+  Download,
   FileSearch,
   Loader2,
   PenLine,
@@ -22,7 +23,7 @@ import { AiBadge, DraftBadge, OfficialEvidenceBadge, SourceTag, TeacherInputBadg
 import { useTeachingContext } from "@/context/TeachingContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
 import type { EvidenceItem, LessonPlanDraft } from "@/data/mockData";
-import { describeApiError } from "@/lib/api";
+import { describeApiError, lessonDownloadUrl } from "@/lib/api";
 
 type TextField = Exclude<keyof LessonPlanDraft, "development" | "date">;
 
@@ -52,6 +53,7 @@ export default function LessonReviewPage() {
     selectedTermPlanRow: sourceRow,
     generatedLessonContent,
     evidenceById,
+    currentLessonId,
   } = useWorkspace();
 
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -291,7 +293,7 @@ export default function LessonReviewPage() {
           <div className="flex items-start gap-3 rounded-lg border border-brand-border bg-brand-softer px-4 py-3">
             <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-brand-strong" />
             <p className="text-sm text-brand-ink">
-              Confirmed and saved to{" "}
+              Confirmed — view it in{" "}
               <Link href="/library" className="font-medium underline underline-offset-2">
                 My Library
               </Link>
@@ -320,6 +322,20 @@ export default function LessonReviewPage() {
             <Save className="size-4" />
             Keep as draft
           </Button>
+          {/* Only a saved lesson exists on the server to download. */}
+          {currentLessonId ? (
+            <Button variant="outline" asChild className="gap-2">
+              <a href={lessonDownloadUrl(currentLessonId)}>
+                <Download className="size-4" />
+                Download
+              </a>
+            </Button>
+          ) : (
+            <Button variant="outline" disabled className="gap-2" title="Save or confirm the lesson plan first">
+              <Download className="size-4" />
+              Download
+            </Button>
+          )}
           <Button
             variant="outline"
             onClick={() => setDiscardOpen(true)}
