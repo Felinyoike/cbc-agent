@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -8,6 +8,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   Info,
+  Loader2,
   Save,
   ShieldAlert,
   Sparkles,
@@ -17,20 +18,34 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { ConfirmationDialog } from "@/components/ConfirmationDialog";
 import { AiBadge, ConfirmedBadge, DraftBadge, OfficialEvidenceBadge, SourceTag, TeacherInputBadge } from "@/components/Provenance";
-import { useTeachingContext } from "@/context/TeachingContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
+import { outcomeStatusLabels, type OutcomeStatus } from "@/data/mockData";
 import {
-  evidenceItems,
-  outcomeStatusLabels,
-  type OutcomeStatus,
-  type ReflectionRecord,
-} from "@/data/mockData";
+  CurriculumApiError,
+  confirmReflectionRecord,
+  createReflection,
+  describeApiError,
+  generateReflectionSummary,
+  getLesson,
+  getReflectionByLesson,
+  getScheme,
+  updateReflection,
+  type LessonRecord,
+  type ReflectionContentInput,
+  type ReflectionEvidence,
+  type ReflectionStatus,
+  type Scheme,
+} from "@/lib/api";
 
-const evidencePrompts: {
-  key: keyof ReflectionRecord["evidence"];
-  label: string;
-  placeholder: string;
-}[] = [
+const emptyEvidence: ReflectionEvidence = {
+  learnerActions: "",
+  workEvidence: "",
+  needSupport: "",
+  difficulties: "",
+  revisit: "",
+};
+
+const evidencePrompts: { key: keyof ReflectionEvidence; label: string; placeholder: string }[] = [
   {
     key: "learnerActions",
     label: "What did learners say or do?",
@@ -81,37 +96,106 @@ const outcomeOptions: { value: OutcomeStatus; description: string; tone: string 
   },
 ];
 
+type LoadState = "loading" | "ready" | "not-found" | "not-confirmed" | "error";
+
+/** `id` is the confirmed lesson plan's id; its reflection record is created on first save. */
 export function ReflectionWorkspace({ id }: { id: string }) {
   const router = useRouter();
-  const context = useTeachingContext();
-  const { reflections, setReflectionEvidence, setOutcomeStatus, confirmReflection, hasReflectionEvidence } =
-    useWorkspace();
+  const { evidenceById } = useWorkspace();
 
-  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [loadState, setLoadState] = useState<LoadState>("loading");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [lesson, setLesson] = useState<LessonRecord | null>(null);
+  const [scheme, setScheme] = useState<Scheme | null>(null);
+
+  const [reflectionId, setReflectionId] = useState<string | null>(null);
+  const [status, setStatus] = useState<ReflectionStatus>("not_started");
+  const [evidence, setEvidence] = useState<ReflectionEvidence>(emptyEvidence);
+  const [outcomeStatus, setOutcomeStatus] = useState<OutcomeStatus | null>(null);
+  const [agentSummary, setAgentSummary] = useState<string | null>(null);
+
+  const [busy, setBusy] = useState<"saving" | "generating" | "confirming" | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
   const [blockedReason, setBlockedReason] = useState<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
-  const record = reflections.find((item) => item.id === id);
+  useEffect(() => {
+    const controller = new AbortController();
+    const { signal } = controller;
+    (async () => {
+      try {
+        const lessonRow = await getLesson(id, signal);
+        if (lessonRow.status !== "confirmed") {
+          setLesson(lessonRow);
+          setLoadState("not-confirmed");
+          return;
+        }
+        const [schemeRow, existing] = await Promise.all([
+          lessonRow.scheme_id ? getScheme(lessonRow.scheme_id, signal).catch(() => null) : Promise.resolve(null),
+          getReflectionByLesson(id, signal),
+        ]);
+        if (signal.aborted) return;
+        setLesson(lessonRow);
+        setScheme(schemeRow);
+        const record = existing.reflection;
+        if (record) {
+          setReflectionId(record.id);
+          setStatus(record.status);
+          setEvidence({ ...emptyEvidence, ...record.evidence });
+          setOutcomeStatus(record.outcomeStatus);
+          setAgentSummary(record.agentSummary);
+        }
+        setLoadState("ready");
+      } catch (error) {
+        if (signal.aborted) return;
+        // A malformed id (422) or a missing lesson (404) are both "no such lesson".
+        if (error instanceof CurriculumApiError && (error.status === 404 || error.status === 422)) {
+          setLoadState("not-found");
+        } else {
+          setLoadError(describeApiError(error));
+          setLoadState("error");
+        }
+      }
+    })();
+    return () => controller.abort();
+  }, [id]);
 
-  const outcomeEvidence = evidenceItems.find((item) => item.id === "ev-agri-slo-13");
+  /* Best effort only: a lesson row stores no evidence ids, so show the outcome evidence only if
+     this session already holds a matching item. Never fall back to a fixed id. */
+  const outcomeEvidence = useMemo(
+    () =>
+      lesson
+        ? Object.values(evidenceById).find(
+            (item) =>
+              item.category === "Specific Learning Outcomes" &&
+              item.strand === lesson.strand &&
+              item.subStrand === lesson.sub_strand
+          )
+        : undefined,
+    [lesson, evidenceById]
+  );
 
-  /* The assistant may summarise what the teacher wrote — it never proposes or
-     selects an achievement status. */
-  const assistantSummary = useMemo(() => {
-    if (!record) return null;
-    const filled = evidencePrompts
-      .map(({ key, label }) => ({ label, value: record.evidence[key].trim() }))
-      .filter((entry) => entry.value.length > 0);
-    if (filled.length === 0) return null;
-    return `You recorded evidence under ${filled.length} of ${evidencePrompts.length} prompts. Your notes mention ${filled
-      .map((entry) => entry.label.replace(/\?$/, "").toLowerCase())
-      .join("; ")}. Consider whether this is enough to judge the outcome, and which of it you would show a colleague as proof.`;
-  }, [record]);
+  if (loadState === "loading") {
+    return (
+      <main className="flex flex-1 items-center justify-center gap-2 bg-canvas p-8 text-sm text-muted-foreground">
+        <Loader2 className="size-4 animate-spin" />
+        Loading the lesson…
+      </main>
+    );
+  }
 
-  if (!record) {
+  if (loadState !== "ready" || !lesson) {
+    const message =
+      loadState === "not-confirmed"
+        ? "Reflections are recorded for confirmed lesson plans. Confirm this lesson plan in Daily Lessons first."
+        : loadState === "error"
+          ? `Could not load this lesson. ${loadError}`
+          : "That lesson plan could not be found.";
     return (
       <main className="flex flex-1 flex-col items-center justify-center gap-3 bg-canvas p-8 text-center">
-        <p className="text-sm font-medium">That reflection record could not be found.</p>
+        <p className="max-w-md text-sm font-medium">{message}</p>
         <Button variant="outline" asChild>
           <Link href="/reflections">Back to reflections</Link>
         </Button>
@@ -119,21 +203,84 @@ export function ReflectionWorkspace({ id }: { id: string }) {
     );
   }
 
-  const hasEvidence = hasReflectionEvidence(record.id);
-  const isConfirmed = record.status === "confirmed";
-  const canConfirm = hasEvidence && Boolean(record.outcomeStatus) && !isConfirmed;
+  const title = lesson.content?.title?.trim() || lesson.sub_strand;
+  const lessonDate = lesson.content?.date || lesson.lesson_date;
+  const schemeContext = scheme ? `${scheme.grade} ${scheme.subject} · Term ${scheme.term} ${scheme.year}` : null;
+  const isConfirmed = status === "confirmed";
+  const hasEvidence = Object.values(evidence).some((value) => value.trim().length > 0);
+  const canConfirm = hasEvidence && Boolean(outcomeStatus) && !isConfirmed;
+  const editingLocked = isConfirmed || busy !== null;
+
+  /** Creates the record on first save and updates it afterwards; resolves to the saved record. */
+  const persist = async (content: ReflectionContentInput, summary?: string) => {
+    const saved = reflectionId
+      ? await updateReflection(reflectionId, content, summary)
+      : await createReflection(id, content, summary);
+    setReflectionId(saved.id);
+    setStatus(saved.status);
+    setSavedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+    return saved;
+  };
+
+  const handleSave = async () => {
+    setBusy("saving");
+    setSaveError(null);
+    try {
+      await persist({ evidence, outcomeStatus });
+    } catch (error) {
+      setSaveError(describeApiError(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleGenerate = async () => {
+    setBusy("generating");
+    setSummaryError(null);
+    setSaveError(null);
+    const snapshot = { evidence, outcomeStatus };
+    try {
+      const { summary } = await generateReflectionSummary(snapshot.evidence);
+      setAgentSummary(summary);
+      try {
+        // Saved straight away so a generated summary is never lost on reload.
+        await persist(snapshot, summary);
+      } catch (error) {
+        setSaveError(`The summary was generated but not saved. ${describeApiError(error)}`);
+      }
+    } catch (error) {
+      setSummaryError(describeApiError(error));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const handleConfirmAttempt = () => {
     if (!hasEvidence) {
       setBlockedReason("Enter at least one piece of post-lesson evidence before confirming this record.");
       return;
     }
-    if (!record.outcomeStatus) {
+    if (!outcomeStatus) {
       setBlockedReason("Select an outcome status based on the evidence you recorded.");
       return;
     }
     setBlockedReason(null);
     setConfirmOpen(true);
+  };
+
+  const handleConfirm = async () => {
+    setBusy("confirming");
+    setBlockedReason(null);
+    try {
+      // Save first so the confirmed record holds exactly what the teacher reviewed.
+      const saved = await persist({ evidence, outcomeStatus });
+      const confirmed = await confirmReflectionRecord(saved.id);
+      setStatus(confirmed.status);
+    } catch (error) {
+      setBlockedReason(`Could not confirm this record. ${describeApiError(error)}`);
+    } finally {
+      setBusy(null);
+    }
   };
 
   return (
@@ -148,13 +295,23 @@ export function ReflectionWorkspace({ id }: { id: string }) {
           </Button>
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-2xl font-semibold tracking-tight text-neutral-950">Post-lesson reflection</h1>
-            {isConfirmed ? <ConfirmedBadge /> : <DraftBadge>{record.status === "draft" ? "Reflection draft" : "Not started"}</DraftBadge>}
+            {isConfirmed ? (
+              <ConfirmedBadge />
+            ) : (
+              <DraftBadge>{status === "draft" ? "Reflection draft" : "Not started"}</DraftBadge>
+            )}
           </div>
           <p className="text-sm text-muted-foreground">
-            {record.lessonTitle} · taught {formatDate(record.date)} · {context.grade} {context.subject} ·{" "}
-            {context.className}
+            {[title, lessonDate ? `lesson date ${formatDate(lessonDate)}` : "", schemeContext].filter(Boolean).join(" · ")}
           </p>
         </div>
+
+        {isConfirmed && (
+          <div className="flex items-start gap-3 rounded-lg border border-brand-border bg-brand-softer px-4 py-3">
+            <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-brand-strong" />
+            <p className="text-sm text-brand-ink">This reflection record is confirmed and can no longer be edited.</p>
+          </div>
+        )}
 
         <div className="grid items-start gap-6 xl:grid-cols-[1fr_360px]">
           <div className="flex flex-col gap-6">
@@ -174,10 +331,10 @@ export function ReflectionWorkspace({ id }: { id: string }) {
                   <label key={key} className="flex flex-col gap-1.5">
                     <span className="text-sm font-medium text-neutral-900">{label}</span>
                     <Textarea
-                      value={record.evidence[key]}
-                      onChange={(event) => setReflectionEvidence(record.id, { [key]: event.target.value })}
+                      value={evidence[key]}
+                      onChange={(event) => setEvidence((prev) => ({ ...prev, [key]: event.target.value }))}
                       placeholder={placeholder}
-                      disabled={isConfirmed}
+                      disabled={editingLocked}
                       className="min-h-20 disabled:opacity-70"
                     />
                   </label>
@@ -198,10 +355,10 @@ export function ReflectionWorkspace({ id }: { id: string }) {
                 </div>
               </CardHeader>
               <CardContent className="gap-2 p-0">
-                <fieldset className="flex flex-col gap-2" disabled={isConfirmed}>
+                <fieldset className="flex flex-col gap-2" disabled={editingLocked}>
                   <legend className="sr-only">Outcome status</legend>
                   {outcomeOptions.map((option) => {
-                    const selected = record.outcomeStatus === option.value;
+                    const selected = outcomeStatus === option.value;
                     return (
                       <label
                         key={option.value}
@@ -213,7 +370,7 @@ export function ReflectionWorkspace({ id }: { id: string }) {
                           name="outcome-status"
                           value={option.value}
                           checked={selected}
-                          onChange={() => setOutcomeStatus(record.id, option.value)}
+                          onChange={() => setOutcomeStatus(option.value)}
                           className="mt-1 size-4 accent-[var(--color-brand)]"
                         />
                         <span className="flex flex-col gap-0.5">
@@ -243,17 +400,52 @@ export function ReflectionWorkspace({ id }: { id: string }) {
                 </div>
               </CardHeader>
               <CardContent className="gap-3 p-0">
-                {assistantSummary ? (
-                  <p className="text-sm leading-relaxed text-neutral-800">{assistantSummary}</p>
+                {agentSummary ? (
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-800">{agentSummary}</p>
                 ) : (
                   <p className="text-sm text-muted-foreground">
-                    Once you record evidence, the assistant will summarise it here.
+                    {hasEvidence
+                      ? "Generate a summary of the evidence you have recorded."
+                      : "Record evidence first; the assistant can then summarise it."}
+                  </p>
+                )}
+                {!isConfirmed && (
+                  <div className="flex flex-col items-start gap-1.5">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleGenerate()}
+                      disabled={!hasEvidence || busy !== null}
+                      className="gap-1.5"
+                    >
+                      {busy === "generating" ? (
+                        <>
+                          <Loader2 className="size-3.5 animate-spin" />
+                          Generating summary…
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="size-3.5" />
+                          {agentSummary ? "Regenerate summary" : "Generate summary"}
+                        </>
+                      )}
+                    </Button>
+                    {agentSummary && (
+                      <p className="text-xs text-muted-foreground">
+                        Written from your evidence when you generated it. Regenerate after changing your notes.
+                      </p>
+                    )}
+                  </div>
+                )}
+                {summaryError && (
+                  <p role="alert" className="text-xs text-destructive">
+                    Could not generate a summary. {summaryError}
                   </p>
                 )}
                 <div className="flex items-start gap-2 rounded-lg bg-neutral-100 p-3">
                   <Info className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
                   <p className="text-xs leading-snug text-muted-foreground">
-                    The assistant summarises and suggests follow-up only. It never selects the achievement
+                    The assistant only summarises what you wrote. It never selects or suggests the achievement
                     status — that decision stays with you.
                   </p>
                 </div>
@@ -265,17 +457,27 @@ export function ReflectionWorkspace({ id }: { id: string }) {
           <Card className="gap-4 p-6">
             <CardHeader className="gap-2 p-0">
               <CardTitle className="text-base">Lesson context</CardTitle>
-              <OfficialEvidenceBadge className="self-start" />
             </CardHeader>
             <CardContent className="gap-4 p-0">
               <div className="flex flex-col gap-1.5">
                 <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  Sub-strand
+                  Strand › Sub-strand
                 </span>
-                <p className="text-sm text-neutral-800">Food Production Processes › Soil Conservation</p>
+                <p className="text-sm text-neutral-800">
+                  {lesson.strand} › {lesson.sub_strand}
+                </p>
               </div>
+              {lesson.content?.outcomes?.trim() && (
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Lesson plan outcomes
+                  </span>
+                  <p className="text-sm leading-relaxed text-neutral-800">{lesson.content.outcomes}</p>
+                </div>
+              )}
               {outcomeEvidence && (
                 <div className="flex flex-col gap-1.5">
+                  <OfficialEvidenceBadge className="self-start" />
                   <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                     Specific Learning Outcomes
                   </span>
@@ -290,33 +492,34 @@ export function ReflectionWorkspace({ id }: { id: string }) {
 
       <footer className="flex shrink-0 flex-wrap items-center justify-between gap-4 border-t border-border bg-white px-4 py-4 md:px-8">
         <div className="flex max-w-md flex-col gap-1">
-          {blockedReason && (
-            <p className="flex items-center gap-1.5 text-xs font-medium text-destructive">
+          {(blockedReason || saveError) && (
+            <p role="alert" className="flex items-center gap-1.5 text-xs font-medium text-destructive">
               <AlertTriangle className="size-3.5" />
-              {blockedReason}
+              {blockedReason ?? `Reflection draft not saved. ${saveError}`}
             </p>
           )}
           <p className="text-xs text-muted-foreground">
-            {savedAt ? `Reflection draft saved at ${savedAt}. ` : ""}
+            {savedAt && !isConfirmed ? `Reflection draft saved at ${savedAt}. ` : ""}
             A reflection record cannot be confirmed without your evidence and a chosen outcome status.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <Button variant="secondary" onClick={() => router.push("/reflections")} className="gap-2">
-            Continue later
+            {isConfirmed ? "Back to reflections" : "Continue later"}
           </Button>
-          <Button
-            variant="outline"
-            disabled={isConfirmed}
-            onClick={() => setSavedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}
-            className="gap-2"
-          >
-            <Save className="size-4" />
-            Save reflection draft
+          <Button variant="outline" disabled={editingLocked} onClick={() => void handleSave()} className="gap-2">
+            {busy === "saving" ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+            {busy === "saving" ? "Saving…" : "Save reflection draft"}
           </Button>
-          <Button onClick={handleConfirmAttempt} disabled={isConfirmed} className="gap-2">
-            {isConfirmed ? <CheckCircle2 className="size-4" /> : <Sparkles className="size-4" />}
-            {isConfirmed ? "Reflection confirmed" : "Confirm reflection record"}
+          <Button onClick={handleConfirmAttempt} disabled={editingLocked} className="gap-2">
+            {busy === "confirming" ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : isConfirmed ? (
+              <CheckCircle2 className="size-4" />
+            ) : (
+              <Sparkles className="size-4" />
+            )}
+            {isConfirmed ? "Reflection confirmed" : busy === "confirming" ? "Confirming…" : "Confirm reflection record"}
           </Button>
         </div>
       </footer>
@@ -325,28 +528,22 @@ export function ReflectionWorkspace({ id }: { id: string }) {
         open={confirmOpen && canConfirm}
         onOpenChange={setConfirmOpen}
         title="Confirm this reflection record"
-        description="You are about to store this post-lesson reflection as your own teacher work product. It will appear in My Library and set the outcome status for this lesson."
+        description="You are about to store this post-lesson reflection as your own teacher work product. It sets the outcome status for this lesson and can no longer be edited afterwards."
         acknowledgement="I have recorded this outcome status based on the evidence above, not on the fact that the lesson was delivered."
         confirmLabel="Confirm reflection record"
         storedItems={[
-          `Your evidence for "${record.lessonTitle}" (taught ${formatDate(record.date)})`,
-          `Outcome status: ${record.outcomeStatus ? outcomeStatusLabels[record.outcomeStatus] : "—"}`,
-          "A citation to the specific learning outcome this lesson addressed (KICD design page 13)",
-          "The assistant's summary, stored separately and labelled as AI-assisted",
+          `Your evidence for "${title}"${lessonDate ? ` (lesson date ${formatDate(lessonDate)})` : ""}`,
+          `Outcome status: ${outcomeStatus ? outcomeStatusLabels[outcomeStatus] : "—"}`,
+          agentSummary
+            ? "The assistant's summary, stored separately and labelled as AI-assisted"
+            : "No assistant summary (none was generated)",
         ]}
-        onConfirm={() => {
-          const ok = confirmReflection(record.id);
-          if (!ok) setBlockedReason("Evidence and an outcome status are both required before confirming.");
-        }}
+        onConfirm={() => void handleConfirm()}
       />
     </div>
   );
 }
 
 function formatDate(value: string) {
-  return new Date(`${value}T00:00:00`).toLocaleDateString("en-GB", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
+  return new Date(`${value}T00:00:00`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }

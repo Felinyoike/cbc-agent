@@ -1,4 +1,4 @@
-import type { EvidenceItem, LessonPlanDraft, TermPlanRow } from "@/data/mockData";
+import type { EvidenceItem, LessonPlanDraft, OutcomeStatus, TermPlanRow } from "@/data/mockData";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -213,8 +213,8 @@ export function updateScheme(id: string, rows: TermPlanRow[]) {
   });
 }
 
-export function getScheme(id: string) {
-  return requestJson<Scheme>(`/api/schemes/${id}`);
+export function getScheme(id: string, signal?: AbortSignal) {
+  return requestJson<Scheme>(`/api/schemes/${id}`, { signal });
 }
 
 export function confirmScheme(id: string) {
@@ -274,10 +274,89 @@ export function updateLesson(id: string, content: LessonPlanDraft) {
   });
 }
 
-export function getLesson(id: string) {
-  return requestJson<LessonRecord>(`/api/lessons/${id}`);
+export function getLesson(id: string, signal?: AbortSignal) {
+  return requestJson<LessonRecord>(`/api/lessons/${id}`, { signal });
 }
 
 export function confirmLesson(id: string) {
   return requestJson<LessonRecord>(`/api/lessons/${id}/confirm`, { method: "POST" });
+}
+
+/* Post-lesson reflections: one record per confirmed lesson plan. */
+
+export interface ReflectionEvidence {
+  learnerActions: string;
+  workEvidence: string;
+  needSupport: string;
+  difficulties: string;
+  revisit: string;
+}
+
+/** "not_started" means the confirmed lesson has no reflection record at all yet. */
+export type ReflectionStatus = "not_started" | "draft" | "confirmed";
+
+export interface ReflectionListItem {
+  lessonId: string;
+  lessonTitle: string;
+  lessonDate: string;
+  strand: string;
+  subStrand: string;
+  /** Null for a lesson plan that was never linked to a saved scheme. */
+  grade: string | null;
+  subject: string | null;
+  reflectionId: string | null;
+  status: ReflectionStatus;
+  evidence: ReflectionEvidence | null;
+  outcomeStatus: OutcomeStatus | null;
+  agentSummary: string | null;
+}
+
+export interface ReflectionRecordData {
+  id: string;
+  lessonId: string;
+  status: "draft" | "confirmed";
+  evidence: ReflectionEvidence;
+  outcomeStatus: OutcomeStatus | null;
+  agentSummary: string | null;
+  updatedAt: string;
+}
+
+export interface ReflectionContentInput {
+  evidence: ReflectionEvidence;
+  outcomeStatus: OutcomeStatus | null;
+}
+
+export function getReflections(signal?: AbortSignal) {
+  return requestJson<{ items: ReflectionListItem[] }>("/api/reflections", { signal });
+}
+
+export function getReflectionByLesson(lessonId: string, signal?: AbortSignal) {
+  return requestJson<{ reflection: ReflectionRecordData | null }>(`/api/reflections/by-lesson/${lessonId}`, { signal });
+}
+
+export function createReflection(lessonId: string, content: ReflectionContentInput, agentSummary?: string) {
+  return requestJson<ReflectionRecordData>("/api/reflections", {
+    method: "POST",
+    body: JSON.stringify({ lesson_id: lessonId, content, agent_summary: agentSummary }),
+  });
+}
+
+/** An omitted summary keeps the stored one. */
+export function updateReflection(id: string, content: ReflectionContentInput, agentSummary?: string) {
+  return requestJson<ReflectionRecordData>(`/api/reflections/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ content, agent_summary: agentSummary }),
+  });
+}
+
+/** The server re-checks evidence and outcome status and rejects with 400 if either is missing. */
+export function confirmReflectionRecord(id: string) {
+  return requestJson<ReflectionRecordData>(`/api/reflections/${id}/confirm`, { method: "POST" });
+}
+
+export function generateReflectionSummary(evidence: ReflectionEvidence) {
+  return requestJson<{ summary: string }>("/api/generate/reflection-summary", {
+    method: "POST",
+    body: JSON.stringify({ evidence }),
+  });
 }

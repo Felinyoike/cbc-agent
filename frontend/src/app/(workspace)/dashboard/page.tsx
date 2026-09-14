@@ -159,7 +159,7 @@ export default function DashboardPage() {
                 </p>
               </div>
               <Button asChild className="shrink-0 gap-2 bg-draft-strong text-white hover:bg-draft-strong/90">
-                <Link href={nextReflection ? `/reflections/${nextReflection.id}` : "/reflections"}>
+                <Link href="/reflections">
                   <PencilLine className="size-4" />
                   Reflect now
                 </Link>
@@ -224,7 +224,7 @@ export default function DashboardPage() {
                   Record post-lesson evidence to set outcome status.
                 </p>
                 <Button variant="outline" size="sm" asChild className="mt-1 gap-1.5 self-start">
-                  <Link href={nextReflection ? `/reflections/${nextReflection.id}` : "/reflections"}>
+                  <Link href="/reflections">
                     Add reflection
                     <ArrowRight className="size-3.5" />
                   </Link>
