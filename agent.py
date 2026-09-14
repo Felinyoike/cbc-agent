@@ -1,32 +1,70 @@
 import os
+import re
+import json
 import chromadb
-from google import genai
-from google.genai import types
+import boto3
 from dotenv import load_dotenv
 
+from bedrock_embedding import BedrockEmbeddingFunction
 from gemini_embedding import GeminiEmbeddingFunction
 from models import LessonPlan, SchemeOfWork
 from doc_generator import create_lesson_plan_docx, create_scheme_of_work_docx
 
 # 1. Load environment variables
 load_dotenv()
-api_key = os.environ.get("GEMINI_API_KEY")
-if not api_key:
-    raise ValueError("GEMINI_API_KEY is missing. Check your .env file.")
 
-# 2. Initialize Gemini Client
-ai_client = genai.Client(api_key=api_key)
+# AWS Credentials & Bedrock Configuration
+aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+aws_region = os.environ.get("AWS_REGION", "us-east-1")
+bedrock_model_id = os.environ.get("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20240620-v1:0")
 
-# 3. Connect to the Chroma Vector Database
+gemini_key = os.environ.get("GEMINI_API_KEY")
+
+# 2. Determine AI Provider (Bedrock vs Gemini)
+if aws_access_key or os.environ.get("AWS_PROFILE") or os.environ.get("AWS_DEFAULT_REGION"):
+    use_bedrock = True
+    print(f"Using AWS Bedrock provider (Region: {aws_region}, Model: {bedrock_model_id})")
+    bedrock_client = boto3.client(
+        service_name="bedrock-runtime",
+        region_name=aws_region,
+        aws_access_key_id=aws_access_key,
+        aws_secret_access_key=aws_secret_key,
+        aws_session_token=os.environ.get("AWS_SESSION_TOKEN"),
+    )
+    embedding_function = BedrockEmbeddingFunction(region_name=aws_region)
+elif gemini_key:
+    use_bedrock = False
+    print("Using Google Gemini provider")
+    from google import genai
+    from google.genai import types
+    ai_client = genai.Client(api_key=gemini_key)
+    embedding_function = GeminiEmbeddingFunction(api_key=gemini_key)
+else:
+    use_bedrock = True
+    print(f"Using AWS Bedrock provider (Default boto3 credential chain, Region: {aws_region})")
+    bedrock_client = boto3.client(
+        service_name="bedrock-runtime",
+        region_name=aws_region
+    )
+    embedding_function = BedrockEmbeddingFunction(region_name=aws_region)
+
+# 3. Connect to Chroma Vector Database
 CHROMA_DB_PATH = "kicd_chroma_db"
 COLLECTION_NAME = "kicd_curriculum"
 
 db_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-gemini_ef = GeminiEmbeddingFunction(api_key=api_key)
-collection = db_client.get_collection(
-    name=COLLECTION_NAME,
-    embedding_function=gemini_ef,
-)
+try:
+    collection = db_client.get_collection(
+        name=COLLECTION_NAME,
+        embedding_function=embedding_function,
+    )
+except Exception:
+    # If collection doesn't exist yet or needs to be initialized
+    collection = db_client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        embedding_function=embedding_function,
+    )
 
 def retrieve_context(query: str, n_results: int = 5) -> str:
     """Searches the vector database for the most relevant curriculum chunks."""
@@ -35,7 +73,6 @@ def retrieve_context(query: str, n_results: int = 5) -> str:
         n_results=n_results
     )
     
-    # Combine the found texts into a single context string
     if not results["documents"] or not results["documents"][0]:
         return "No relevant KICD curriculum context found."
         
@@ -50,16 +87,14 @@ def generate_lesson_plan(prompt: str) -> LessonPlan:
     print(" Thinking and structuring the Lesson Plan...")
     
     system_instruction = f"""You are an expert Kenyan CBC curriculum developer and teacher.
-    Use the provided KICD curriculum context to generate a detailed, highly accurate Lesson Plan.
-    Do NOT invent specific learning outcomes, experiences, or rubrics if they contradict the provided context.
-    Fill out every field in the required schema thoughtfully.
+Use the provided KICD curriculum context to generate a detailed, highly accurate Lesson Plan.
+Do NOT invent specific learning outcomes, experiences, or rubrics if they contradict the provided context.
+Fill out every field in the required schema thoughtfully.
+
+KICD CONTEXT:
+{context}
+"""
     
-    KICD CONTEXT:
-    {context}
-    """
-    
-    
-    # We manually define the schema dictionary to match YOUR models.py exactly
     manual_schema = {
         "type": "OBJECT",
         "properties": {
@@ -102,20 +137,43 @@ def generate_lesson_plan(prompt: str) -> LessonPlan:
         ]
     }
     
-    response = ai_client.models.generate_content(
-        model='gemini-3.1-flash-lite',
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            response_mime_type="application/json",
-            response_schema=manual_schema, 
-            temperature=0.2, 
-        ),
-    )
-    
-    # We parse the pure JSON text response back into our Pydantic object
-    return LessonPlan.model_validate_json(response.text)
-    
+    if use_bedrock:
+        json_system_prompt = f"""{system_instruction}
+
+CRITICAL: Return ONLY valid JSON matching this exact JSON schema:
+{json.dumps(manual_schema, indent=2)}
+
+Do NOT include any introduction, conversational text, or markdown code block markers (like ```json).
+"""
+        response = bedrock_client.converse(
+            modelId=bedrock_model_id,
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            system=[{"text": json_system_prompt}],
+            inferenceConfig={
+                "temperature": 0.2,
+                "maxTokens": 4096
+            }
+        )
+        raw_text = response["output"]["message"]["content"][0]["text"]
+        
+        # Clean markdown code fences if present
+        cleaned_text = re.sub(r"^```json\s*", "", raw_text.strip(), flags=re.MULTILINE)
+        cleaned_text = re.sub(r"^```\s*", "", cleaned_text.strip(), flags=re.MULTILINE)
+        cleaned_text = cleaned_text.rstrip("`").strip()
+        
+        return LessonPlan.model_validate_json(cleaned_text)
+    else:
+        response = ai_client.models.generate_content(
+            model='gemini-3.1-flash-lite',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                response_mime_type="application/json",
+                response_schema=manual_schema, 
+                temperature=0.2, 
+            ),
+        )
+        return LessonPlan.model_validate_json(response.text)
     
 if __name__ == "__main__":
     print(" CBC Agent is ready!")
