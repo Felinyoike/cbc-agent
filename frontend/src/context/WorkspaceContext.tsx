@@ -1,12 +1,12 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useTeachingContext } from "@/context/TeachingContext";
+import { confirmScheme, createScheme, generateTermPlanRows, updateScheme } from "@/lib/api";
 import {
-  evidenceItems,
   initialLessonPlan,
   initialLessons,
   initialReflections,
-  initialTermPlanRows,
   libraryItems as seedLibrary,
   type EvidenceItem,
   type LessonPlanDraft,
@@ -32,13 +32,20 @@ interface WorkspaceState {
   addEvidence: (item: EvidenceItem) => void;
   removeEvidence: (id: string) => void;
   clearEvidence: () => void;
+  /** Every evidence item selected this session, kept after deselection so citations still resolve. */
+  evidenceById: Record<string, EvidenceItem>;
 
   termPlanRows: TermPlanRow[];
+  /** The generated text of each row, keyed by row id, so review can tell teacher edits apart. */
+  generatedRowContent: Record<string, GeneratedRowContent>;
   updateTermPlanRow: (id: string, patch: Partial<TermPlanRow>) => void;
-  addTermPlanRowFromEvidence: () => void;
+  /** Generates week rows from the selected evidence; resolves to the number of rows added. */
+  addTermPlanRowFromEvidence: () => Promise<number>;
   removeTermPlanRow: (id: string) => void;
   termPlanConfirmed: boolean;
-  confirmTermPlan: () => void;
+  currentSchemeId: string | null;
+  saveTermPlanDraft: () => Promise<void>;
+  confirmTermPlan: () => Promise<void>;
   discardTermPlan: () => void;
 
   lessons: Lesson[];
@@ -63,14 +70,22 @@ interface WorkspaceState {
   setContextWarning: (message: string | null) => void;
 }
 
+export type GeneratedRowContent = Pick<
+  TermPlanRow,
+  "keyInquiryQuestion" | "outcomes" | "experiences" | "resources" | "assessment"
+>;
+
 const WorkspaceContext = createContext<WorkspaceState | undefined>(undefined);
 
 const STORAGE_KEY = "cbc.workspace";
 
 interface PersistedShape {
-  selectedEvidenceIds: string[];
+  selectedEvidence: EvidenceItem[];
+  evidenceById: Record<string, EvidenceItem>;
   termPlanRows: TermPlanRow[];
   termPlanConfirmed: boolean;
+  currentSchemeId: string | null;
+  generatedRowContent: Record<string, GeneratedRowContent>;
   lessonPlan: LessonPlanDraft;
   lessonPlanConfirmed: boolean;
   reflections: ReflectionRecord[];
@@ -79,9 +94,13 @@ interface PersistedShape {
 }
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
+  const teaching = useTeachingContext();
   const [selectedEvidence, setSelectedEvidence] = useState<EvidenceItem[]>([]);
-  const [termPlanRows, setTermPlanRows] = useState<TermPlanRow[]>(initialTermPlanRows);
+  const [evidenceById, setEvidenceById] = useState<Record<string, EvidenceItem>>({});
+  const [termPlanRows, setTermPlanRows] = useState<TermPlanRow[]>([]);
+  const [generatedRowContent, setGeneratedRowContent] = useState<Record<string, GeneratedRowContent>>({});
   const [termPlanConfirmed, setTermPlanConfirmed] = useState(false);
+  const [currentSchemeId, setCurrentSchemeId] = useState<string | null>(null);
   const [lessons, setLessons] = useState<Lesson[]>(initialLessons);
   const [lessonPlan, setLessonPlan] = useState<LessonPlanDraft>(initialLessonPlan);
   const [lessonPlanConfirmed, setLessonPlanConfirmed] = useState(false);
@@ -98,15 +117,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         // Hydrating from localStorage has to happen after mount, otherwise the
         // server-rendered markup and the first client render disagree.
         /* eslint-disable react-hooks/set-state-in-effect */
-        if (parsed.selectedEvidenceIds) {
-          setSelectedEvidence(
-            parsed.selectedEvidenceIds
-              .map((id) => evidenceItems.find((item) => item.id === id))
-              .filter((item): item is EvidenceItem => Boolean(item))
-          );
+        if (parsed.selectedEvidence) setSelectedEvidence(parsed.selectedEvidence);
+        if (parsed.evidenceById) setEvidenceById(parsed.evidenceById);
+        if (parsed.termPlanRows) {
+          // Rows saved before keyInquiryQuestion existed would otherwise crash string handling.
+          setTermPlanRows(parsed.termPlanRows.map((row) => ({ ...row, keyInquiryQuestion: row.keyInquiryQuestion ?? "" })));
         }
-        if (parsed.termPlanRows) setTermPlanRows(parsed.termPlanRows);
         if (parsed.termPlanConfirmed !== undefined) setTermPlanConfirmed(parsed.termPlanConfirmed);
+        if (parsed.currentSchemeId !== undefined) setCurrentSchemeId(parsed.currentSchemeId);
+        if (parsed.generatedRowContent) setGeneratedRowContent(parsed.generatedRowContent);
         if (parsed.lessonPlan) setLessonPlan(parsed.lessonPlan);
         if (parsed.lessonPlanConfirmed !== undefined) setLessonPlanConfirmed(parsed.lessonPlanConfirmed);
         if (parsed.reflections) setReflections(parsed.reflections);
@@ -124,9 +143,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     if (!isLoaded) return;
     try {
       const payload: PersistedShape = {
-        selectedEvidenceIds: selectedEvidence.map((item) => item.id),
+        selectedEvidence,
+        evidenceById,
         termPlanRows,
         termPlanConfirmed,
+        currentSchemeId,
+        generatedRowContent,
         lessonPlan,
         lessonPlanConfirmed,
         reflections,
@@ -140,8 +162,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, [
     isLoaded,
     selectedEvidence,
+    evidenceById,
     termPlanRows,
     termPlanConfirmed,
+    currentSchemeId,
+    generatedRowContent,
     lessonPlan,
     lessonPlanConfirmed,
     reflections,
@@ -154,19 +179,31 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [selectedEvidence]
   );
 
-  const addEvidence = useCallback((item: EvidenceItem) => {
-    setSelectedEvidence((prev) => (prev.some((e) => e.id === item.id) ? prev : [...prev, item]));
+  const rememberEvidence = useCallback((item: EvidenceItem) => {
+    setEvidenceById((prev) => (prev[item.id] === item ? prev : { ...prev, [item.id]: item }));
   }, []);
+
+  const addEvidence = useCallback(
+    (item: EvidenceItem) => {
+      rememberEvidence(item);
+      setSelectedEvidence((prev) => (prev.some((e) => e.id === item.id) ? prev : [...prev, item]));
+    },
+    [rememberEvidence]
+  );
 
   const removeEvidence = useCallback((id: string) => {
     setSelectedEvidence((prev) => prev.filter((item) => item.id !== id));
   }, []);
 
-  const toggleEvidence = useCallback((item: EvidenceItem) => {
-    setSelectedEvidence((prev) =>
-      prev.some((e) => e.id === item.id) ? prev.filter((e) => e.id !== item.id) : [...prev, item]
-    );
-  }, []);
+  const toggleEvidence = useCallback(
+    (item: EvidenceItem) => {
+      rememberEvidence(item);
+      setSelectedEvidence((prev) =>
+        prev.some((e) => e.id === item.id) ? prev.filter((e) => e.id !== item.id) : [...prev, item]
+      );
+    },
+    [rememberEvidence]
+  );
 
   const clearEvidence = useCallback(() => setSelectedEvidence([]), []);
 
@@ -177,70 +214,113 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setTermPlanConfirmed(false);
   }, []);
 
-  const addTermPlanRowFromEvidence = useCallback(() => {
+  const addTermPlanRowFromEvidence = useCallback(async () => {
+    const { rows } = await generateTermPlanRows(selectedEvidence, teaching.grade, teaching.subject);
+    const stamp = Date.now();
+    setGeneratedRowContent((prev) => {
+      const next = { ...prev };
+      rows.forEach((row, index) => {
+        next[`row-${stamp}-${index}`] = {
+          keyInquiryQuestion: row.keyInquiryQuestion,
+          outcomes: row.outcomes,
+          experiences: row.experiences,
+          resources: row.resources,
+          assessment: row.assessment,
+        };
+      });
+      return next;
+    });
     setTermPlanRows((prev) => {
-      const first = selectedEvidence[0];
-      const nextWeek = String(prev.length + 3);
-      const byCategory = (category: string) =>
-        selectedEvidence
-          .filter((item) => item.category === category)
-          .map((item) => item.content)
-          .join(" ");
-
-      const row: TermPlanRow = {
-        id: `row-${Date.now()}`,
-        week: nextWeek,
-        lessons: "—",
-        strand: first?.strand ?? "",
-        subStrand: first?.subStrand ?? "",
-        outcomes: byCategory("Specific Learning Outcomes"),
-        experiences: byCategory("Suggested Learning Experiences"),
-        resources: byCategory("Resources"),
-        assessment: byCategory("Assessment"),
-        reflection: "",
-        status: "draft",
-        evidenceIds: selectedEvidence.map((item) => item.id),
-      };
-      return [...prev, row];
+      const maxWeek = prev.reduce((max, row) => Math.max(max, Number.parseInt(row.week, 10) || 0), 0);
+      return [
+        ...prev,
+        ...rows.map((row, index) => ({
+          ...row,
+          id: `row-${stamp}-${index}`,
+          week: String(maxWeek + index + 1),
+          reflection: "",
+          status: "draft" as const,
+        })),
+      ];
     });
     setTermPlanConfirmed(false);
-  }, [selectedEvidence]);
+    return rows.length;
+  }, [selectedEvidence, teaching.grade, teaching.subject]);
 
   const removeTermPlanRow = useCallback((id: string) => {
     setTermPlanRows((prev) => prev.filter((row) => row.id !== id));
   }, []);
 
-  const confirmTermPlan = useCallback(() => {
+  /** Creates the scheme on first save, updates it afterwards; resolves to its id. */
+  const persistScheme = useCallback(
+    async (rows: TermPlanRow[]) => {
+      if (currentSchemeId) {
+        await updateScheme(currentSchemeId, rows);
+        return currentSchemeId;
+      }
+      const created = await createScheme({
+        grade: teaching.grade,
+        subject: teaching.subject,
+        term: teaching.term,
+        year: teaching.year,
+        rows,
+      });
+      setCurrentSchemeId(created.id);
+      return created.id;
+    },
+    [currentSchemeId, teaching.grade, teaching.subject, teaching.term, teaching.year]
+  );
+
+  const saveTermPlanDraft = useCallback(async () => {
+    await persistScheme(termPlanRows);
+  }, [persistScheme, termPlanRows]);
+
+  const confirmTermPlan = useCallback(async () => {
+    const confirmedRows = termPlanRows.map((row) => ({ ...row, status: "confirmed" as const }));
+    // Save first so the confirmed record holds exactly what the teacher reviewed.
+    const schemeId = await persistScheme(confirmedRows);
+    await confirmScheme(schemeId);
+
     setTermPlanConfirmed(true);
-    setTermPlanRows((prev) => prev.map((row) => ({ ...row, status: "confirmed" as const })));
+    setTermPlanRows(confirmedRows);
+    const citedIds = new Set(confirmedRows.flatMap((row) => row.evidenceIds));
     setLibrary((prev) => [
       {
         id: `lib-${Date.now()}`,
         type: "Scheme of Work",
-        title: "Food Production Processes — Term 1 scheme",
-        grade: "Grade 5",
-        subject: "Agriculture",
-        term: "Term 1",
-        className: "5 East",
+        title: `${teaching.subject} — ${teaching.term} scheme of work`,
+        grade: teaching.grade,
+        subject: teaching.subject,
+        term: teaching.term,
+        className: teaching.className,
         updated: new Date().toISOString().slice(0, 10),
         version: "v1",
-        evidenceCount: new Set(termPlanRows.flatMap((row) => row.evidenceIds)).size,
+        evidenceCount: citedIds.size,
         pages: Array.from(
           new Set(
-            termPlanRows
-              .flatMap((row) => row.evidenceIds)
-              .map((id) => evidenceItems.find((item) => item.id === id)?.page)
+            Array.from(citedIds)
+              .map((id) => evidenceById[id]?.page)
               .filter((page): page is number => typeof page === "number")
           )
         ).sort((a, b) => a - b),
       },
       ...prev,
     ]);
-  }, [termPlanRows]);
+  }, [
+    termPlanRows,
+    persistScheme,
+    evidenceById,
+    teaching.grade,
+    teaching.subject,
+    teaching.term,
+    teaching.className,
+  ]);
 
   const discardTermPlan = useCallback(() => {
-    setTermPlanRows(initialTermPlanRows);
+    setTermPlanRows([]);
+    setGeneratedRowContent({});
     setTermPlanConfirmed(false);
+    setCurrentSchemeId(null);
   }, []);
 
   const updateLessonPlan = useCallback((patch: Partial<LessonPlanDraft>) => {
@@ -354,11 +434,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     addEvidence,
     removeEvidence,
     clearEvidence,
+    evidenceById,
     termPlanRows,
+    generatedRowContent,
     updateTermPlanRow,
     addTermPlanRowFromEvidence,
     removeTermPlanRow,
     termPlanConfirmed,
+    currentSchemeId,
+    saveTermPlanDraft,
     confirmTermPlan,
     discardTermPlan,
     lessons,

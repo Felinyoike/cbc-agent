@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, ArrowLeft, CheckCircle2, FileSearch, PenLine, Save, Sparkles, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CheckCircle2, FileSearch, Loader2, PenLine, Save, Sparkles, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ConfirmationDialog, DiscardDialog } from "@/components/ConfirmationDialog";
@@ -11,43 +11,60 @@ import { SourceDrawer } from "@/components/SourceDrawer";
 import { AiBadge, DraftBadge, OfficialEvidenceBadge, SourceTag, TeacherInputBadge } from "@/components/Provenance";
 import { useTeachingContext } from "@/context/TeachingContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
-import { evidenceItems, initialTermPlanRows, type EvidenceItem } from "@/data/mockData";
+import type { EvidenceItem } from "@/data/mockData";
+import { describeApiError } from "@/lib/api";
 
 export default function TermPlanReviewPage() {
   const router = useRouter();
   const context = useTeachingContext();
-  const { termPlanRows, confirmTermPlan, discardTermPlan, termPlanConfirmed } = useWorkspace();
+  const { termPlanRows, generatedRowContent, confirmTermPlan, discardTermPlan, termPlanConfirmed, evidenceById } =
+    useWorkspace();
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
   const [sourceItem, setSourceItem] = useState<EvidenceItem | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+
+  const handleConfirm = async () => {
+    setConfirming(true);
+    setConfirmError(null);
+    try {
+      await confirmTermPlan();
+    } catch (error) {
+      setConfirmError(describeApiError(error));
+    } finally {
+      setConfirming(false);
+    }
+  };
 
   /* Evidence actually cited by the rows in this draft. */
   const citedEvidence = useMemo(() => {
     const ids = new Set(termPlanRows.flatMap((row) => row.evidenceIds));
-    return evidenceItems.filter((item) => ids.has(item.id));
-  }, [termPlanRows]);
+    return Array.from(ids)
+      .map((id) => evidenceById[id])
+      .filter((item): item is EvidenceItem => Boolean(item));
+  }, [termPlanRows, evidenceById]);
 
-  /* Rows whose text the teacher changed from the seeded draft. */
+  /* Text the teacher changed from what was generated (reflection is always teacher-entered). */
   const teacherEdits = useMemo(
     () =>
       termPlanRows.flatMap((row) => {
-        const original = initialTermPlanRows.find((seed) => seed.id === row.id);
-        if (!original) {
-          return [{ rowId: row.id, week: row.week, field: "New planning row", value: row.outcomes }];
-        }
+        const original = generatedRowContent[row.id];
         const changed: { rowId: string; week: string; field: string; value: string }[] = [];
-        (["outcomes", "experiences", "resources", "assessment", "reflection"] as const).forEach((field) => {
-          if (row[field] !== original[field] && row[field].trim()) {
+        (["keyInquiryQuestion", "outcomes", "experiences", "resources", "assessment", "reflection"] as const).forEach((field) => {
+          const baseline = field === "reflection" ? "" : original?.[field] ?? "";
+          if (row[field] !== baseline && row[field].trim()) {
             changed.push({ rowId: row.id, week: row.week, field, value: row[field] });
           }
         });
         return changed;
       }),
-    [termPlanRows]
+    [termPlanRows, generatedRowContent]
   );
 
   const fieldLabels: Record<string, string> = {
+    keyInquiryQuestion: "Key Inquiry Question",
     outcomes: "Specific Learning Outcomes",
     experiences: "Suggested Learning Experiences",
     resources: "Resources",
@@ -150,11 +167,17 @@ export default function TermPlanReviewPage() {
             </p>
           </CardHeader>
           <CardContent className="gap-0 p-0">
+            {termPlanRows.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
+                This draft has no planning rows yet. Go back to the term plan workspace and add rows from
+                selected curriculum evidence.
+              </p>
+            ) : (
             <div className="custom-scrollbar overflow-x-auto rounded-lg border border-ai-border">
               <table className="w-full border-collapse text-sm">
                 <thead>
                   <tr className="bg-ai-softer text-left">
-                    {["Week", "Sub-strand", "Specific Learning Outcomes", "Suggested Learning Experiences", "Assessment"].map(
+                    {["Week", "Sub-strand", "Key Inquiry Question", "Specific Learning Outcomes", "Suggested Learning Experiences", "Assessment"].map(
                       (heading) => (
                         <th key={heading} scope="col" className="border-b border-ai-border px-3 py-2 font-medium">
                           {heading}
@@ -168,6 +191,7 @@ export default function TermPlanReviewPage() {
                     <tr key={row.id} className="border-b border-border last:border-b-0">
                       <td className="px-3 py-2 font-medium">{row.week}</td>
                       <td className="px-3 py-2 text-muted-foreground">{row.subStrand}</td>
+                      <td className="px-3 py-2">{row.keyInquiryQuestion}</td>
                       <td className="px-3 py-2">{row.outcomes}</td>
                       <td className="px-3 py-2">{row.experiences}</td>
                       <td className="px-3 py-2 text-muted-foreground">{row.assessment}</td>
@@ -176,6 +200,7 @@ export default function TermPlanReviewPage() {
                 </tbody>
               </table>
             </div>
+            )}
           </CardContent>
         </Card>
 
@@ -209,6 +234,13 @@ export default function TermPlanReviewPage() {
             )}
           </CardContent>
         </Card>
+
+        {confirmError && (
+          <div role="alert" className="flex items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-3">
+            <AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" />
+            <p className="text-sm text-destructive">Could not confirm this term plan. {confirmError}</p>
+          </div>
+        )}
 
         {termPlanConfirmed && (
           <div className="flex items-start gap-3 rounded-lg border border-brand-border bg-brand-softer px-4 py-3">
@@ -247,9 +279,9 @@ export default function TermPlanReviewPage() {
             <Trash2 className="size-4" />
             Discard
           </Button>
-          <Button onClick={() => setConfirmOpen(true)} disabled={termPlanConfirmed} className="gap-2">
-            <Sparkles className="size-4" />
-            {termPlanConfirmed ? "Confirmed" : "Confirm and save"}
+          <Button onClick={() => setConfirmOpen(true)} disabled={termPlanConfirmed || confirming || termPlanRows.length === 0} className="gap-2">
+            {confirming ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+            {termPlanConfirmed ? "Confirmed" : confirming ? "Saving…" : "Confirm and save"}
           </Button>
         </div>
       </footer>
@@ -265,13 +297,13 @@ export default function TermPlanReviewPage() {
           "Your edits and notes, labelled as teacher input",
           "A record that this draft was AI-assisted and reviewed by you",
         ]}
-        onConfirm={confirmTermPlan}
+        onConfirm={() => void handleConfirm()}
       />
 
       <DiscardDialog
         open={discardOpen}
         onOpenChange={setDiscardOpen}
-        description="This draft has unsaved work. Discarding resets the term plan to its starting state and nothing will be recorded in your library."
+        description="This draft has unsaved work. Discarding removes every planning row and nothing will be recorded in your library."
         onConfirm={() => {
           discardTermPlan();
           router.push("/dashboard");

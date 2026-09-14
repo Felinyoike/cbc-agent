@@ -1,3 +1,4 @@
+import json
 import os
 import chromadb
 from google import genai
@@ -115,7 +116,81 @@ def generate_lesson_plan(prompt: str) -> LessonPlan:
     
     # We parse the pure JSON text response back into our Pydantic object
     return LessonPlan.model_validate_json(response.text)
-    
+
+
+TERM_PLAN_FIELD_SOURCES = {
+    "keyInquiryQuestion": "Key Inquiry Questions",
+    "outcomes": "Specific Learning Outcomes",
+    "experiences": "Suggested Learning Experiences",
+    "resources": "Resources",
+    "assessment": "Assessment",
+}
+
+
+def generate_term_plan_content(grade: str, subject: str, strand: str, sub_strand: str,
+                               evidence_by_category: dict[str, str]) -> dict[str, str]:
+    """Organises ONLY the supplied KICD evidence for one sub-strand into scheme-of-work fields."""
+    evidence_text = "\n\n".join(
+        f"[{category}]\n{content}" for category, content in evidence_by_category.items()
+    )
+
+    system_instruction = f"""You are an expert Kenyan CBC curriculum developer and teacher.
+    Organise the provided KICD curriculum evidence into one scheme-of-work entry for
+    {grade} {subject}, strand "{strand}", sub-strand "{sub_strand}".
+
+    HARD CONSTRAINTS:
+    - Use ONLY the evidence below. You may rephrase for clarity, but never add an outcome,
+      activity, resource, assessment method, fact or question that is not in the evidence.
+    - Each field comes only from its matching evidence category:
+      keyInquiryQuestion <- [Key Inquiry Questions]; outcomes <- [Specific Learning Outcomes];
+      experiences <- [Suggested Learning Experiences]; resources <- [Resources];
+      assessment <- [Assessment].
+    - If a field's category is absent from the evidence, return an empty string for it.
+      Never invent a key inquiry question.
+
+    KICD EVIDENCE:
+    {evidence_text}
+    """
+
+    manual_schema = {
+        "type": "OBJECT",
+        "properties": {field: {"type": "STRING"} for field in TERM_PLAN_FIELD_SOURCES},
+        "required": list(TERM_PLAN_FIELD_SOURCES),
+    }
+
+    request = f"Organise the evidence for {sub_strand} into the scheme-of-work fields."
+    # Gemini blocks near-verbatim copies of published text (finish_reason RECITATION),
+    # which KICD designs are; a retry asking for rewording stays grounded but passes.
+    retry_request = (request + " Rephrase each field in your own words rather than copying"
+                     " the evidence verbatim, without adding anything new.")
+
+    response = None
+    for contents in (request, retry_request):
+        response = ai_client.models.generate_content(
+            model='gemini-3.1-flash-lite',
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                response_mime_type="application/json",
+                response_schema=manual_schema,
+                temperature=0.2,
+            ),
+        )
+        if response.text:
+            break
+
+    if not response.text:
+        candidate = response.candidates[0] if response.candidates else None
+        reason = candidate.finish_reason if candidate else response.prompt_feedback
+        raise RuntimeError(f"Gemini returned no content (reason: {reason})")
+
+    generated = json.loads(response.text)
+    # Enforced here as well as in the prompt: a field with no source evidence stays empty.
+    return {
+        field: (str(generated.get(field) or "").strip() if category in evidence_by_category else "")
+        for field, category in TERM_PLAN_FIELD_SOURCES.items()
+    }
+
     
 if __name__ == "__main__":
     print(" CBC Agent is ready!")

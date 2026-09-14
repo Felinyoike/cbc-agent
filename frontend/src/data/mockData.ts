@@ -251,6 +251,7 @@ export interface TermPlanRow {
   lessons: string;
   strand: string;
   subStrand: string;
+  keyInquiryQuestion: string;
   outcomes: string;
   experiences: string;
   resources: string;
@@ -260,58 +261,6 @@ export interface TermPlanRow {
   /** Evidence ids the row was built from — drives the citations on review. */
   evidenceIds: string[];
 }
-
-export const initialTermPlanRows: TermPlanRow[] = [
-  {
-    id: "row-w3",
-    week: "3",
-    lessons: "1–2",
-    strand: "Food Production Processes",
-    subStrand: "Soil Conservation",
-    outcomes:
-      "Identify methods of soil conservation in the locality; appreciate why soil is conserved for food production.",
-    experiences:
-      "Learners walk around the school compound to observe signs of soil erosion; discuss mulching, cover cropping and terracing in groups.",
-    resources: "School farm, charts on soil erosion, KICD approved course book.",
-    assessment: "Oral questions and observation schedule during the compound walk.",
-    reflection: "",
-    status: "reviewed",
-    evidenceIds: ["ev-agri-slo-13", "ev-agri-sle-13", "ev-agri-res-13"],
-  },
-  {
-    id: "row-w4",
-    week: "4",
-    lessons: "3–4",
-    strand: "Food Production Processes",
-    subStrand: "Soil Conservation",
-    outcomes:
-      "Practise appropriate methods of conserving soil in the school farm.",
-    experiences:
-      "Learners make terraces or plant cover crops on the school farm in groups; share soil conservation experiences from home.",
-    resources: "School farm, jembes and rakes, resource person from the community.",
-    assessment:
-      "Practical work assessed with a participation rubric (Exceeds / Meets / Approaches / Below expectation).",
-    reflection: "",
-    status: "reviewed",
-    evidenceIds: ["ev-agri-slo-13", "ev-agri-sle-13", "ev-agri-assess-13"],
-  },
-  {
-    id: "row-w5",
-    week: "5",
-    lessons: "5–6",
-    strand: "Food Production Processes",
-    subStrand: "Crop Farming Practices",
-    outcomes:
-      "Identify crop farming practices carried out in the locality.",
-    experiences:
-      "Learners interview a farmer or resource person, then present crop farming practices used in the community.",
-    resources: "Digital devices, resource person, learner's course book.",
-    assessment: "Group presentation assessed with an oral rubric.",
-    reflection: "",
-    status: "draft",
-    evidenceIds: ["ev-agri-slo-15"],
-  },
-];
 
 /* ------------------------------------------------------------------ */
 /* Daily lessons                                                       */

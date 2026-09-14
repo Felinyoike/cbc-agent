@@ -123,7 +123,7 @@ export default function LessonPlanPage() {
               <AssistantPanel
                 open={assistantOpen}
                 onOpenChange={setAssistantOpen}
-                context={`${sourceRow?.subStrand} · Week ${sourceRow?.week}`}
+                context={sourceRow ? `${sourceRow.subStrand} · Week ${sourceRow.week}` : "No term plan rows yet"}
               />
             </div>
           </Card>

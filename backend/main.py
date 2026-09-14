@@ -1,25 +1,35 @@
-"""Curriculum search API over the ingested KICD ChromaDB collection.
-
-Scope is deliberately narrow: browse/search curriculum evidence, nothing else.
-No Postgres, no scheme/lesson endpoints, no generation.
+"""CBC Teacher Agent API: curriculum search (ChromaDB), schemes of work (Postgres)
+and grounded term-plan generation (Gemini).
 
 Run from the PROJECT ROOT (cbc-agent/), not from inside backend/:
     python -m uvicorn backend.main:app --reload --port 8000
 """
 import logging
+import math
 from collections import defaultdict
-from typing import Optional
+from contextlib import asynccontextmanager
+from typing import Any, Optional
+from uuid import UUID
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from psycopg2.extras import Json
 from pydantic import BaseModel
 
 from backend.chroma import SEMANTIC_AVAILABLE, collection
+from backend.db import connection as db
 from backend.parsing import UNSUPPORTED_CATEGORIES, chunk_to_evidence_items
 
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="CBC Teacher Agent API")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    db.init_db()
+    yield
+
+
+app = FastAPI(title="CBC Teacher Agent API", lifespan=lifespan)
 
 # Allow the Next.js frontend (port 3000) to call this API
 app.add_middleware(
@@ -144,3 +154,182 @@ def search_curriculum(req: SearchRequest):
     if degraded:
         response["semanticUnavailable"] = True
     return response
+
+
+# ---------------------------------------------------------------------------
+# Schemes of work (Postgres)
+# ---------------------------------------------------------------------------
+
+class SchemeContent(BaseModel):
+    # TermPlanRow objects are stored exactly as the frontend sends them.
+    rows: list[dict[str, Any]]
+
+
+class SchemeCreate(BaseModel):
+    grade: str
+    subject: str
+    term: int
+    year: int
+    content: SchemeContent
+
+
+class SchemeUpdate(BaseModel):
+    content: SchemeContent
+
+
+def _require_db():
+    if not db.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Scheme storage is unavailable: Postgres is not configured or unreachable (check DATABASE_URL).",
+        )
+
+
+@app.post("/api/schemes")
+def create_scheme(body: SchemeCreate):
+    _require_db()
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO schemes_of_work (user_id, grade, subject, term, year, content, status)
+               VALUES (%s, %s, %s, %s, %s, %s, 'draft') RETURNING *""",
+            (db.demo_user_id, body.grade, body.subject, body.term, body.year,
+             Json(body.content.model_dump())),
+        )
+        return cur.fetchone()
+
+
+@app.patch("/api/schemes/{scheme_id}")
+def update_scheme(scheme_id: UUID, body: SchemeUpdate):
+    _require_db()
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE schemes_of_work SET content = %s WHERE id = %s RETURNING *",
+            (Json(body.content.model_dump()), str(scheme_id)),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Scheme not found")
+    return row
+
+
+@app.get("/api/schemes/{scheme_id}")
+def get_scheme(scheme_id: UUID):
+    _require_db()
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM schemes_of_work WHERE id = %s", (str(scheme_id),))
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Scheme not found")
+    return row
+
+
+@app.post("/api/schemes/{scheme_id}/confirm")
+def confirm_scheme(scheme_id: UUID):
+    _require_db()
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE schemes_of_work SET status = 'confirmed' WHERE id = %s RETURNING *",
+            (str(scheme_id),),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Scheme not found")
+        cur.execute(
+            """INSERT INTO confirmation_logs (entity_type, entity_id, user_id, action)
+               VALUES ('scheme', %s, %s, 'confirmed')""",
+            (str(scheme_id), db.demo_user_id),
+        )
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Grounded term-plan generation
+# ---------------------------------------------------------------------------
+
+LESSONS_PER_WEEK = 3
+
+
+class EvidenceIn(BaseModel):
+    id: str
+    category: str
+    grade: str
+    subject: str
+    strand: str
+    subStrand: str
+    content: str
+
+
+class GenerateTermPlanRequest(BaseModel):
+    evidence: list[EvidenceIn]
+    grade: str
+    subject: str
+
+
+def _num_lessons(grade: str, subject: str, strand: str, sub_strand: str) -> int:
+    """The sub-strand's real lesson allocation, or one week's worth if unknown."""
+    try:
+        res = collection.get(
+            where={"$and": [{"grade": grade}, {"subject": subject},
+                            {"strand": strand}, {"sub_strand": sub_strand}]},
+            include=["metadatas"],
+        )
+        value = int(str(res["metadatas"][0].get("num_lessons", "")).strip())
+        return value if value > 0 else LESSONS_PER_WEEK
+    except Exception:
+        return LESSONS_PER_WEEK
+
+
+def _lesson_ranges(num_lessons: int) -> list[str]:
+    ranges = []
+    for week in range(math.ceil(num_lessons / LESSONS_PER_WEEK)):
+        start = week * LESSONS_PER_WEEK + 1
+        end = min(start + LESSONS_PER_WEEK - 1, num_lessons)
+        ranges.append(str(start) if start == end else f"{start}-{end}")
+    return ranges
+
+
+@app.post("/api/generate/term-plan-rows")
+def generate_term_plan_rows(req: GenerateTermPlanRequest):
+    if not req.evidence:
+        raise HTTPException(status_code=400, detail="No evidence supplied")
+
+    try:
+        # Imported lazily: agent.py raises at import time without GEMINI_API_KEY,
+        # which must not take down the curriculum endpoints.
+        from agent import generate_term_plan_content
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Generation is unavailable: {exc}") from exc
+
+    groups: dict[tuple[str, str], list[EvidenceIn]] = defaultdict(list)
+    for item in req.evidence:
+        groups[(item.strand, item.subStrand)].append(item)
+
+    rows = []
+    for (strand, sub_strand), items in groups.items():
+        # Evidence carries the exact Chroma metadata it came from; fall back to the
+        # request's teaching context only if an item lacks it.
+        grade = items[0].grade or req.grade
+        subject = items[0].subject or req.subject
+
+        evidence_by_category: dict[str, str] = defaultdict(str)
+        for item in items:
+            evidence_by_category[item.category] = "\n".join(
+                part for part in (evidence_by_category[item.category], item.content) if part
+            )
+
+        try:
+            content = generate_term_plan_content(grade, subject, strand, sub_strand, dict(evidence_by_category))
+        except Exception as exc:
+            logging.exception("term-plan generation failed for %s / %s", strand, sub_strand)
+            raise HTTPException(status_code=502, detail=f"Term plan generation failed: {exc}") from exc
+
+        for lessons in _lesson_ranges(_num_lessons(grade, subject, strand, sub_strand)):
+            rows.append({
+                "strand": strand,
+                "subStrand": sub_strand,
+                **content,
+                "evidenceIds": [item.id for item in items],
+                "lessons": lessons,
+            })
+
+    return {"rows": rows}

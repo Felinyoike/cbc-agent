@@ -4,8 +4,11 @@ import { Suspense, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  AlertTriangle,
   ChevronRight,
   ClipboardCheck,
+  FileSearch,
+  Loader2,
   Plus,
   Save,
   Trash2,
@@ -18,9 +21,24 @@ import { DiscardDialog } from "@/components/ConfirmationDialog";
 import { ConfirmedBadge, DraftBadge, OfficialEvidenceBadge } from "@/components/Provenance";
 import { useTeachingContext } from "@/context/TeachingContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
-import { evidenceItems, type ContentCategory, type EvidenceItem, type TermPlanRow } from "@/data/mockData";
+import type { ContentCategory, EvidenceItem, TermPlanRow } from "@/data/mockData";
+import { describeApiError } from "@/lib/api";
 
 const TOTAL_PLANNING_UNITS = 10;
+
+/* Week and the strand names stay narrow; the free-text planning columns share the rest,
+   weighted toward outcomes and experiences. Below the minimum width the table scrolls. */
+const SCHEME_COLUMNS = [
+  { heading: "Week", width: "w-[72px]" },
+  { heading: "Strand", width: "w-[120px]" },
+  { heading: "Sub-strand", width: "w-[130px]" },
+  { heading: "Key Inquiry Question", width: "w-[170px]" },
+  { heading: "Specific Learning Outcomes", width: "w-[250px]" },
+  { heading: "Suggested Learning Experiences", width: "w-[270px]" },
+  { heading: "Resources", width: "w-[180px]" },
+  { heading: "Assessment", width: "w-[180px]" },
+  { heading: "Reflection/Remarks", width: "w-[150px]" },
+];
 
 export default function TermPlansPage() {
   return (
@@ -42,34 +60,65 @@ function TermPlanWorkspace() {
     discardTermPlan,
     termPlanConfirmed,
     selectedEvidence,
+    saveTermPlanDraft,
   } = useWorkspace();
 
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const [generateNotice, setGenerateNotice] = useState<string | null>(null);
 
   const cameFromExplorer = searchParams.get("from") === "evidence";
 
-  /* The evidence panel shows what the teacher selected; if they have not been
-     to the explorer yet, fall back to the sub-strand this plan is built on. */
-  const panelEvidence = useMemo(() => {
-    if (selectedEvidence.length > 0) return selectedEvidence;
-    return evidenceItems.filter(
-      (item) => item.subject === "Agriculture" && item.subStrand === "Soil Conservation"
-    );
-  }, [selectedEvidence]);
-
   const grouped = useMemo(() => {
     const map = new Map<ContentCategory, EvidenceItem[]>();
-    panelEvidence.forEach((item) => {
+    selectedEvidence.forEach((item) => {
       map.set(item.category, [...(map.get(item.category) ?? []), item]);
     });
     return Array.from(map.entries());
-  }, [panelEvidence]);
+  }, [selectedEvidence]);
 
   const reviewedCount = termPlanRows.filter((row) => row.status !== "draft").length;
   const progressPercent = Math.round((reviewedCount / TOTAL_PLANNING_UNITS) * 100);
-  const headEvidence = panelEvidence[0];
+  const headEvidence = selectedEvidence[0];
+
+  const handleGenerate = async () => {
+    setGenerating(true);
+    setGenerateError(null);
+    setGenerateNotice(null);
+    try {
+      const count = await addTermPlanRowFromEvidence();
+      setGenerateNotice(`Added ${count} weekly ${count === 1 ? "row" : "rows"} from the curriculum's lesson allocation.`);
+    } catch (error) {
+      setGenerateError(describeApiError(error));
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await saveTermPlanDraft();
+      setSavedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+    } catch (error) {
+      setSaveError(describeApiError(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const generateLabel = generating ? (
+    <>
+      <Loader2 className="size-3.5 animate-spin" />
+      Generating weekly rows…
+    </>
+  ) : null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -109,15 +158,44 @@ function TermPlanWorkspace() {
               {selectedEvidence.length} evidence {selectedEvidence.length === 1 ? "item" : "items"} carried in
               from the Curriculum Explorer. Add a planning row to use {selectedEvidence.length === 1 ? "it" : "them"}.
             </p>
-            <Button size="sm" onClick={addTermPlanRowFromEvidence} className="gap-1.5">
-              <Plus className="size-3.5" />
-              Add planning row
+            <Button size="sm" onClick={handleGenerate} disabled={generating} className="gap-1.5">
+              {generateLabel ?? (
+                <>
+                  <Plus className="size-3.5" />
+                  Add planning row
+                </>
+              )}
             </Button>
           </div>
         )}
 
+        {generateError && (
+          <div role="alert" className="flex items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-3">
+            <AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" />
+            <p className="text-sm text-destructive">Could not generate planning rows. {generateError}</p>
+          </div>
+        )}
+        {generateNotice && !generateError && (
+          <p role="status" className="text-sm text-brand-ink">{generateNotice}</p>
+        )}
+
         <div className="grid items-start gap-6 xl:grid-cols-[380px_1fr]">
           {/* Left column — official curriculum evidence */}
+          {selectedEvidence.length === 0 ? (
+          <Card className="gap-3 p-6">
+            <OfficialEvidenceBadge className="self-start" />
+            <div className="flex items-start gap-2">
+              <FileSearch className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+              <p className="text-sm text-muted-foreground">
+                No curriculum evidence selected yet. Visit the{" "}
+                <Link href="/curriculum" className="text-brand-strong underline underline-offset-2">
+                  Curriculum Explorer
+                </Link>{" "}
+                and select evidence for one sub-strand to build planning rows from it.
+              </p>
+            </div>
+          </Card>
+          ) : (
           <Card className="gap-4 p-6">
             <CardHeader className="gap-2 p-0">
               <OfficialEvidenceBadge className="self-start" />
@@ -171,6 +249,7 @@ function TermPlanWorkspace() {
               />
             </CardFooter>
           </Card>
+          )}
 
           {/* Right column — the teacher-facing scheme of work */}
           <Card className="gap-4 p-4 md:p-6">
@@ -182,25 +261,30 @@ function TermPlanWorkspace() {
             </CardHeader>
 
             <CardContent className="gap-0 p-0">
+              {termPlanRows.length === 0 && (
+                <div className="flex items-start gap-2 rounded-lg border border-dashed border-border p-4">
+                  <FileSearch className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                  <p className="text-sm text-muted-foreground">
+                    No planning rows yet. Rows are generated from the curriculum evidence you select for one
+                    sub-strand, paced by its KICD lesson allocation.
+                  </p>
+                </div>
+              )}
+
               {/* Desktop: the familiar wide scheme table */}
-              <div className="custom-scrollbar hidden overflow-x-auto rounded-lg border border-border lg:block">
-                <table className="w-full border-collapse text-sm">
+              <div
+                className={`custom-scrollbar hidden overflow-x-auto rounded-lg border border-border ${
+                  termPlanRows.length === 0 ? "" : "lg:block"
+                }`}
+              >
+                <table className="w-full min-w-[1520px] table-fixed border-collapse text-sm">
                   <thead>
                     <tr className="bg-neutral-100 text-left">
-                      {[
-                        "Week",
-                        "Strand",
-                        "Sub-strand",
-                        "Specific Learning Outcomes",
-                        "Suggested Learning Experiences",
-                        "Resources",
-                        "Assessment",
-                        "Reflection/Remarks",
-                      ].map((heading) => (
+                      {SCHEME_COLUMNS.map(({ heading, width }) => (
                         <th
                           key={heading}
                           scope="col"
-                          className="border-b border-border px-2 py-2 font-medium first:w-16"
+                          className={`border-b border-border px-2 py-2 align-bottom font-medium ${width}`}
                         >
                           {heading}
                         </th>
@@ -224,8 +308,9 @@ function TermPlanWorkspace() {
                       {row.status === "draft" ? <DraftBadge>draft</DraftBadge> : <ConfirmedBadge>reviewed</ConfirmedBadge>}
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      {row.strand} › {row.subStrand}
+                      {row.strand} › {row.subStrand} · Lessons {row.lessons}
                     </p>
+                    <MobileField label="Key Inquiry Question" value={row.keyInquiryQuestion} onChange={(keyInquiryQuestion) => updateTermPlanRow(row.id, { keyInquiryQuestion })} />
                     <MobileField label="Specific Learning Outcomes" value={row.outcomes} onChange={(outcomes) => updateTermPlanRow(row.id, { outcomes })} />
                     <MobileField label="Suggested Learning Experiences" value={row.experiences} onChange={(experiences) => updateTermPlanRow(row.id, { experiences })} />
                     <MobileField label="Resources" value={row.resources} onChange={(resources) => updateTermPlanRow(row.id, { resources })} />
@@ -237,12 +322,16 @@ function TermPlanWorkspace() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={addTermPlanRowFromEvidence}
-                disabled={selectedEvidence.length === 0}
+                onClick={handleGenerate}
+                disabled={selectedEvidence.length === 0 || generating}
                 className="mt-4 gap-1.5 self-start"
               >
-                <Plus className="size-3.5" />
-                Add row from selected evidence
+                {generateLabel ?? (
+                  <>
+                    <Plus className="size-3.5" />
+                    Add rows from selected evidence
+                  </>
+                )}
               </Button>
               {selectedEvidence.length === 0 && (
                 <p className="mt-2 text-xs text-muted-foreground">
@@ -260,9 +349,13 @@ function TermPlanWorkspace() {
 
       <footer className="flex shrink-0 flex-wrap items-center justify-between gap-4 border-t border-border bg-white px-4 py-4 md:px-8">
         <p className="max-w-md text-xs text-muted-foreground">
-          {savedAt
-            ? `Draft saved at ${savedAt}. `
-            : ""}
+          {saveError ? (
+            <span role="alert" className="text-destructive">Draft not saved. {saveError} </span>
+          ) : savedAt ? (
+            `Draft saved at ${savedAt}. `
+          ) : (
+            ""
+          )}
           This is a teacher draft, not official KICD content. Review it against the cited curriculum evidence
           before confirming.
         </p>
@@ -270,10 +363,11 @@ function TermPlanWorkspace() {
           <Button
             variant="secondary"
             className="gap-2"
-            onClick={() => setSavedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}
+            onClick={handleSave}
+            disabled={saving}
           >
-            <Save className="size-4" />
-            Save as draft
+            {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+            {saving ? "Saving…" : "Save as draft"}
           </Button>
           <Button className="gap-2" onClick={() => router.push("/term-plans/review")}>
             <ClipboardCheck className="size-4" />
@@ -293,7 +387,7 @@ function TermPlanWorkspace() {
       <DiscardDialog
         open={discardOpen}
         onOpenChange={setDiscardOpen}
-        description="You have unsaved work in this term plan. Discarding will reset all edited rows back to the starting draft. Selected curriculum evidence is kept."
+        description="You have unsaved work in this term plan. Discarding removes every planning row from this draft. Selected curriculum evidence is kept."
         onConfirm={discardTermPlan}
       />
     </div>
@@ -314,6 +408,7 @@ function SchemeRow({
       <td className="border-r border-border px-2 py-2">
         <div className="flex flex-col gap-1">
           <span className="font-medium">{row.week}</span>
+          <span className="text-[10px] text-muted-foreground">L {row.lessons}</span>
           {row.status === "draft" ? (
             <span className="w-fit rounded-full bg-draft-soft px-1.5 py-0.5 text-[10px] font-medium text-draft-ink">
               draft
@@ -333,8 +428,13 @@ function SchemeRow({
           </button>
         </div>
       </td>
-      <EditableCell value={row.strand} onChange={(strand) => onChange(row.id, { strand })} muted />
-      <EditableCell value={row.subStrand} onChange={(subStrand) => onChange(row.id, { subStrand })} muted />
+      <EditableCell value={row.strand} onChange={(strand) => onChange(row.id, { strand })} multiline muted />
+      <EditableCell value={row.subStrand} onChange={(subStrand) => onChange(row.id, { subStrand })} multiline muted />
+      <EditableCell
+        value={row.keyInquiryQuestion}
+        onChange={(keyInquiryQuestion) => onChange(row.id, { keyInquiryQuestion })}
+        multiline
+      />
       <EditableCell value={row.outcomes} onChange={(outcomes) => onChange(row.id, { outcomes })} multiline />
       <EditableCell
         value={row.experiences}

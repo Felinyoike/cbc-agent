@@ -1,4 +1,4 @@
-import type { EvidenceItem } from "@/data/mockData";
+import type { EvidenceItem, TermPlanRow } from "@/data/mockData";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -89,4 +89,98 @@ export async function getCurriculumOptions(signal?: AbortSignal): Promise<Curric
     throw new CurriculumApiError(response.status, await readDetail(response));
   }
   return response.json();
+}
+
+/** A teacher-readable reason for a failed planning/scheme request. */
+export function describeApiError(error: unknown) {
+  if (error instanceof CurriculumApiError) {
+    return error.detail ?? `The planning service returned an error (${error.status}).`;
+  }
+  return "Could not reach the planning service. Check that the backend is running.";
+}
+
+async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${BASE_URL}${path}`, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...init?.headers },
+  });
+  if (!response.ok) {
+    throw new CurriculumApiError(response.status, await readDetail(response));
+  }
+  return response.json();
+}
+
+/** A generated row: content and pacing only. id, week and status stay frontend-assigned. */
+export type GeneratedTermPlanRow = Pick<
+  TermPlanRow,
+  | "strand"
+  | "subStrand"
+  | "keyInquiryQuestion"
+  | "outcomes"
+  | "experiences"
+  | "resources"
+  | "assessment"
+  | "evidenceIds"
+  | "lessons"
+>;
+
+export function generateTermPlanRows(evidence: EvidenceItem[], grade: string, subject: string) {
+  return requestJson<{ rows: GeneratedTermPlanRow[] }>("/api/generate/term-plan-rows", {
+    method: "POST",
+    body: JSON.stringify({ evidence, grade, subject }),
+  });
+}
+
+export interface Scheme {
+  id: string;
+  user_id: string;
+  grade: string;
+  subject: string;
+  term: number;
+  year: number;
+  content: { rows: TermPlanRow[] };
+  status: "draft" | "confirmed";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SchemeCreateInput {
+  grade: string;
+  subject: string;
+  /** Teaching context strings such as "Term 1" / "2026"; the API stores integers. */
+  term: string;
+  year: string;
+  rows: TermPlanRow[];
+}
+
+function leadingInteger(value: string) {
+  return Number.parseInt(value.replace(/\D+/g, " ").trim().split(" ")[0] ?? "", 10);
+}
+
+export function createScheme({ grade, subject, term, year, rows }: SchemeCreateInput) {
+  return requestJson<Scheme>("/api/schemes", {
+    method: "POST",
+    body: JSON.stringify({
+      grade,
+      subject,
+      term: leadingInteger(term),
+      year: leadingInteger(year),
+      content: { rows },
+    }),
+  });
+}
+
+export function updateScheme(id: string, rows: TermPlanRow[]) {
+  return requestJson<Scheme>(`/api/schemes/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ content: { rows } }),
+  });
+}
+
+export function getScheme(id: string) {
+  return requestJson<Scheme>(`/api/schemes/${id}`);
+}
+
+export function confirmScheme(id: string) {
+  return requestJson<Scheme>(`/api/schemes/${id}/confirm`, { method: "POST" });
 }
