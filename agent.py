@@ -1,10 +1,12 @@
 import os
+import re
 import warnings
 import chromadb
 from dotenv import load_dotenv
 from strands import Agent
 from strands.models.gemini import GeminiModel
 
+from backend.plain_text import to_plain_text
 from gemini_embedding import GeminiEmbeddingFunction
 from models import DailyLessonContent, LessonPlan, SchemeOfWork, TermPlanContent
 from doc_generator import create_lesson_plan_docx, create_scheme_of_work_docx
@@ -240,6 +242,65 @@ def generate_daily_lesson_content(grade: str, subject: str, strand: str, sub_str
         "assessmentActivity": str(generated.get("assessmentActivity") or "").strip() if row["assessment"] else "",
         "conclusion": str(generated.get("conclusion") or "").strip() if row["outcomes"] else "",
     }
+
+
+REFLECTION_EVIDENCE_LABELS = {
+    "learnerActions": "What learners said or did",
+    "workEvidence": "Learner work or assessment evidence available",
+    "needSupport": "Learners or groups needing additional support",
+    "difficulties": "Difficulties observed",
+    "revisit": "What to revisit next lesson",
+}
+
+REFLECTION_SUMMARY_PERSONA = """You summarise a Kenyan CBC teacher's own post-lesson reflection notes back to them.
+
+HARD RULES:
+- Use ONLY what the teacher wrote. Never add a claim about learners, their work, their
+  understanding or their progress that the teacher did not state.
+- Never state, suggest, imply or hint at whether the learning outcome was achieved, partly
+  achieved or not achieved, or whether there is enough evidence to judge it. Do not use words
+  such as achieved, attained, mastered, met the outcome or on track. That decision belongs to
+  the teacher alone.
+- If the teacher recorded little, say plainly that limited evidence was recorded and name the
+  prompts left blank. Do not pad the summary or speculate about what the gaps might mean.
+- Keep it short: two to four sentences.
+- Plain text only: no markdown, asterisks or headings."""
+
+# The outcome decision is the teacher's alone. Any sentence using judgement language is dropped
+# here in code, not just discouraged in the prompt: when in doubt, the sentence is left out.
+_STATUS_LANGUAGE = re.compile(
+    r"\b(achiev\w*|attain\w*|master(ed|y|ing)?|insufficient evidence|on track|"
+    r"(met|meets?|meeting) (the |this |their |its )?(specific )?(learning )?(outcomes?|objectives?)|"
+    r"(outcomes?|objectives?) (was|were|is|are|has been|have been) (not )?met|"
+    r"(exceeds?|meets?|approach(es|ing)?|below) expectations)\b",
+    re.IGNORECASE,
+)
+
+
+def _drop_status_sentences(text: str) -> str:
+    kept_lines = []
+    for line in text.splitlines():
+        kept = [s for s in re.split(r"(?<=[.!?])\s+", line) if s.strip() and not _STATUS_LANGUAGE.search(s)]
+        if kept or not line.strip():
+            kept_lines.append(" ".join(kept))
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
+
+
+def generate_reflection_summary(evidence: dict[str, str]) -> str:
+    """Summarises ONLY the teacher's own reflection notes, in plain text; never judges achievement."""
+    notes = {field: str(evidence.get(field) or "").strip() for field in REFLECTION_EVIDENCE_LABELS}
+    notes_text = "\n\n".join(
+        f"[{label}]\n{notes[field] or '(left blank)'}" for field, label in REFLECTION_EVIDENCE_LABELS.items()
+    )
+
+    # A fresh tool-free Agent per call on the shared model, like the other generation functions.
+    agent = Agent(model=gemini_model, system_prompt=REFLECTION_SUMMARY_PERSONA, callback_handler=None)
+    result = agent(f"Summarise these reflection notes for the teacher.\n\n{notes_text}")
+
+    summary = _drop_status_sentences(to_plain_text(str(result)))
+    if not summary:
+        raise RuntimeError("Every sentence of the summary judged the outcome, so none of it was kept.")
+    return summary
 
 
 

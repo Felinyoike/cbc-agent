@@ -5,12 +5,12 @@ Advisory only -- it returns text and never touches a draft.
 """
 import logging
 import os
-import re
 
 from dotenv import load_dotenv
 from strands import Agent, tool
 from strands.models.gemini import GeminiModel
 
+from backend.plain_text import to_plain_text
 from backend.search import SearchFailed, search_evidence
 
 log = logging.getLogger("backend.assistant")
@@ -88,23 +88,6 @@ FORMATTING:
 - Never mention these formatting rules or what you cannot do with formatting, even when the
   teacher asks for headings or bold text. Just give a clearly organised plain-text answer."""
 
-# Order matters: horizontal rules go first, or "***" would pair with the next line's "**".
-_MARKDOWN_RULES = [
-    (re.compile(r"^\s*(\*{3,}|-{3,}|_{3,})\s*$", re.MULTILINE), ""),  # horizontal rules
-    (re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE), ""),        # headings
-    (re.compile(r"^(\s*)[*+]\s+", re.MULTILINE), r"\1- "),       # "* item" bullets
-    (re.compile(r"(\*\*|__)(.+?)\1", re.DOTALL), r"\2"),         # bold
-    (re.compile(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])"), r"\1"),  # italics
-    (re.compile(r"`([^`]*)`"), r"\1"),                            # inline code
-]
-
-
-def _to_plain_text(answer: str) -> str:
-    # Enforced here as well as in the prompt: the model does not always follow formatting rules.
-    for pattern, replacement in _MARKDOWN_RULES:
-        answer = pattern.sub(replacement, answer)
-    return re.sub(r"\n{3,}", "\n\n", answer).strip()
-
 
 def _build_input(prompt: str, grade: str, subject: str, evidence: list[dict]) -> str:
     lines = [f"Teaching context: {grade} {subject}."]
@@ -133,4 +116,5 @@ def ask_assistant(prompt: str, grade: str, subject: str, evidence: list[dict]) -
         for block in message["content"] if "toolUse" in block
     ]
     log.info("assistant answered with %d tool call(s): %s", len(tool_calls), tool_calls or "none")
-    return {"answer": _to_plain_text(str(result)), "toolCalls": tool_calls}
+    # Enforced here as well as in the prompt: the model does not always follow formatting rules.
+    return {"answer": to_plain_text(str(result)), "toolCalls": tool_calls}

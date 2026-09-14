@@ -49,10 +49,14 @@ CREATE TABLE IF NOT EXISTS lesson_plans (
 CREATE TABLE IF NOT EXISTS evaluation_records (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     lesson_id UUID REFERENCES lesson_plans(id) ON DELETE CASCADE,
-    teacher_evidence TEXT NOT NULL,
-    achievement_status TEXT NOT NULL,
+    user_id UUID REFERENCES users(id),
+    teacher_evidence TEXT,
+    achievement_status TEXT,
     agent_summary TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    content JSONB,
+    status TEXT DEFAULT 'draft',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 6. Audit & Confirmation Logs

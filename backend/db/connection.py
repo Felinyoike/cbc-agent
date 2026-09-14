@@ -39,6 +39,18 @@ def init_db() -> None:
             # The library orders by last update; lesson writes set this explicitly.
             cur.execute("ALTER TABLE lesson_plans ADD COLUMN IF NOT EXISTS updated_at "
                         "TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP")
+            # Reflections: the five evidence fields + outcome status live in content, and a
+            # draft exists before teacher_evidence / achievement_status are known.
+            for statement in (
+                "ALTER TABLE evaluation_records ADD COLUMN IF NOT EXISTS content JSONB",
+                "ALTER TABLE evaluation_records ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'draft'",
+                "ALTER TABLE evaluation_records ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
+                "ALTER TABLE evaluation_records ADD COLUMN IF NOT EXISTS updated_at "
+                "TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP",
+                "ALTER TABLE evaluation_records ALTER COLUMN teacher_evidence DROP NOT NULL",
+                "ALTER TABLE evaluation_records ALTER COLUMN achievement_status DROP NOT NULL",
+            ):
+                cur.execute(statement)
             cur.execute("SELECT id FROM users WHERE email = %s", (DEMO_USER_EMAIL,))
             row = cur.fetchone()
             if row is None:

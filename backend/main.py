@@ -9,14 +9,14 @@ import math
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg2 import errors as pg_errors
 from psycopg2.extras import Json
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.chroma import collection
 from backend.db import connection as db
@@ -371,6 +371,220 @@ def library():
 
     items.sort(key=lambda item: item["updatedAt"], reverse=True)
     return {"items": items}
+
+
+# ---------------------------------------------------------------------------
+# Post-lesson reflections (Postgres), attached to confirmed lesson plans
+# ---------------------------------------------------------------------------
+
+EVIDENCE_FIELDS = ("learnerActions", "workEvidence", "needSupport", "difficulties", "revisit")
+OUTCOME_STATUSES = ("achieved", "partially-achieved", "not-yet-achieved", "insufficient-evidence")
+
+
+class ReflectionEvidence(BaseModel):
+    learnerActions: str = ""
+    workEvidence: str = ""
+    needSupport: str = ""
+    difficulties: str = ""
+    revisit: str = ""
+
+
+class ReflectionContent(BaseModel):
+    evidence: ReflectionEvidence = Field(default_factory=ReflectionEvidence)
+    outcomeStatus: Optional[Literal["achieved", "partially-achieved", "not-yet-achieved", "insufficient-evidence"]] = None
+
+
+class ReflectionCreate(BaseModel):
+    lesson_id: UUID
+    content: ReflectionContent
+    # Omitted means "no summary generated yet"; a PATCH without it keeps the stored one.
+    agent_summary: Optional[str] = None
+
+
+class ReflectionUpdate(BaseModel):
+    content: ReflectionContent
+    agent_summary: Optional[str] = None
+
+
+def _lesson_title(lesson_content: Optional[dict], sub_strand: str) -> str:
+    return ((lesson_content or {}).get("title") or "").strip() or sub_strand
+
+
+def _lesson_date(lesson_content: Optional[dict], lesson_date) -> str:
+    # The draft's own date is what the teacher sees; the column is the fallback.
+    return (lesson_content or {}).get("date") or (lesson_date.isoformat() if lesson_date else "")
+
+
+def _reflection_out(row: dict) -> dict:
+    content = row.get("content") or {}
+    return {
+        "id": str(row["id"]),
+        "lessonId": str(row["lesson_id"]),
+        "status": row["status"],
+        "evidence": {field: (content.get("evidence") or {}).get(field, "") for field in EVIDENCE_FIELDS},
+        "outcomeStatus": content.get("outcomeStatus"),
+        "agentSummary": row.get("agent_summary"),
+        "updatedAt": row.get("updated_at"),
+    }
+
+
+@app.get("/api/reflections")
+def list_reflections():
+    """Every confirmed lesson plan with its reflection, if any, most recent lesson first."""
+    _require_db()
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT l.id AS lesson_id, l.lesson_date, l.strand, l.sub_strand, l.content AS lesson_content,
+                      s.grade, s.subject,
+                      e.id AS reflection_id, e.status AS reflection_status,
+                      e.content AS reflection_content, e.agent_summary
+               FROM lesson_plans l
+               LEFT JOIN schemes_of_work s ON s.id = l.scheme_id
+               LEFT JOIN LATERAL (
+                   SELECT * FROM evaluation_records r WHERE r.lesson_id = l.id
+                   ORDER BY r.created_at DESC LIMIT 1
+               ) e ON TRUE
+               WHERE l.status = 'confirmed'"""
+        )
+        rows = cur.fetchall()
+
+    items = []
+    for row in rows:
+        reflection = row["reflection_content"] or {}
+        has_record = row["reflection_id"] is not None
+        items.append({
+            "lessonId": str(row["lesson_id"]),
+            "lessonTitle": _lesson_title(row["lesson_content"], row["sub_strand"]),
+            "lessonDate": _lesson_date(row["lesson_content"], row["lesson_date"]),
+            "strand": row["strand"],
+            "subStrand": row["sub_strand"],
+            # Null when the lesson was never linked to a saved scheme.
+            "grade": row["grade"],
+            "subject": row["subject"],
+            "reflectionId": str(row["reflection_id"]) if has_record else None,
+            "status": row["reflection_status"] if has_record else "not_started",
+            "evidence": ({field: (reflection.get("evidence") or {}).get(field, "") for field in EVIDENCE_FIELDS}
+                         if has_record else None),
+            "outcomeStatus": reflection.get("outcomeStatus") if has_record else None,
+            "agentSummary": row["agent_summary"] if has_record else None,
+        })
+
+    items.sort(key=lambda item: item["lessonDate"], reverse=True)
+    return {"items": items}
+
+
+@app.get("/api/reflections/by-lesson/{lesson_id}")
+def get_reflection_for_lesson(lesson_id: UUID):
+    """`{"reflection": null}` when none exists yet: "not started" is a normal state, not an error."""
+    _require_db()
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM evaluation_records WHERE lesson_id = %s ORDER BY created_at DESC LIMIT 1",
+            (str(lesson_id),),
+        )
+        row = cur.fetchone()
+    return {"reflection": _reflection_out(row) if row else None}
+
+
+@app.post("/api/reflections")
+def create_reflection(body: ReflectionCreate):
+    _require_db()
+    with db.get_cursor() as cur:
+        cur.execute("SELECT status FROM lesson_plans WHERE id = %s", (str(body.lesson_id),))
+        lesson = cur.fetchone()
+        if lesson is None:
+            raise HTTPException(status_code=404, detail="Lesson plan not found")
+        if lesson["status"] != "confirmed":
+            raise HTTPException(status_code=400, detail="Only a confirmed lesson plan can be reflected on.")
+        cur.execute("SELECT id FROM evaluation_records WHERE lesson_id = %s", (str(body.lesson_id),))
+        if cur.fetchone() is not None:
+            raise HTTPException(status_code=409, detail="This lesson already has a reflection record.")
+        cur.execute(
+            """INSERT INTO evaluation_records (lesson_id, user_id, content, agent_summary, status)
+               VALUES (%s, %s, %s, %s, 'draft') RETURNING *""",
+            (str(body.lesson_id), db.demo_user_id, Json(body.content.model_dump()), body.agent_summary),
+        )
+        return _reflection_out(cur.fetchone())
+
+
+@app.patch("/api/reflections/{reflection_id}")
+def update_reflection(reflection_id: UUID, body: ReflectionUpdate):
+    _require_db()
+    with db.get_cursor() as cur:
+        cur.execute("SELECT status FROM evaluation_records WHERE id = %s", (str(reflection_id),))
+        existing = cur.fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Reflection not found")
+        if existing["status"] == "confirmed":
+            raise HTTPException(status_code=409, detail="A confirmed reflection record can no longer be edited.")
+        cur.execute(
+            """UPDATE evaluation_records
+               SET content = %s, agent_summary = COALESCE(%s, agent_summary), updated_at = CURRENT_TIMESTAMP
+               WHERE id = %s RETURNING *""",
+            (Json(body.content.model_dump()), body.agent_summary, str(reflection_id)),
+        )
+        return _reflection_out(cur.fetchone())
+
+
+@app.post("/api/reflections/{reflection_id}/confirm")
+def confirm_reflection(reflection_id: UUID):
+    _require_db()
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM evaluation_records WHERE id = %s FOR UPDATE", (str(reflection_id),))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Reflection not found")
+        if row["status"] == "confirmed":
+            raise HTTPException(status_code=409, detail="This reflection record is already confirmed.")
+
+        # Validated here, not only in the UI: a record is never confirmed without the
+        # teacher's own evidence and an outcome status the teacher chose.
+        content = row["content"] or {}
+        evidence = content.get("evidence") or {}
+        if not any(str(evidence.get(field) or "").strip() for field in EVIDENCE_FIELDS):
+            raise HTTPException(status_code=400,
+                                detail="Record at least one piece of post-lesson evidence before confirming.")
+        outcome_status = content.get("outcomeStatus")
+        if outcome_status not in OUTCOME_STATUSES:
+            raise HTTPException(status_code=400,
+                                detail="Choose an outcome status based on your evidence before confirming.")
+
+        cur.execute(
+            """UPDATE evaluation_records
+               SET status = 'confirmed', achievement_status = %s, updated_at = CURRENT_TIMESTAMP
+               WHERE id = %s RETURNING *""",
+            (outcome_status, str(reflection_id)),
+        )
+        confirmed = cur.fetchone()
+        cur.execute(
+            """INSERT INTO confirmation_logs (entity_type, entity_id, user_id, action)
+               VALUES ('evaluation', %s, %s, 'confirmed')""",
+            (str(reflection_id), db.demo_user_id),
+        )
+    return _reflection_out(confirmed)
+
+
+class ReflectionSummaryRequest(BaseModel):
+    evidence: ReflectionEvidence
+
+
+@app.post("/api/generate/reflection-summary")
+def generate_reflection_summary_from_evidence(req: ReflectionSummaryRequest):
+    evidence = req.evidence.model_dump()
+    if not any(value.strip() for value in evidence.values()):
+        raise HTTPException(status_code=400, detail="Record some post-lesson evidence before generating a summary.")
+
+    try:
+        from agent import generate_reflection_summary
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Generation is unavailable: {exc}") from exc
+
+    try:
+        summary = generate_reflection_summary(evidence)
+    except Exception as exc:
+        logging.exception("reflection summary generation failed")
+        raise HTTPException(status_code=502, detail=f"Reflection summary generation failed: {exc}") from exc
+    return {"summary": summary}
 
 
 # ---------------------------------------------------------------------------
