@@ -544,21 +544,6 @@ export const assistantSuggestedPrompts = [
   "Help me identify what I still need to decide.",
 ];
 
-/**
- * Canned assistant replies. The prototype does not call a model — these are
- * fixed strings so the assistant can be exercised without a backend.
- */
-export const assistantReplies: Record<string, string> = {
-  "Explain this learning outcome in simpler language.":
-    "In plain terms: learners should be able to point out ways people stop soil from being washed or blown away, try one of those ways on the school farm, and say why it matters for growing food. Check this against the outcome on page 13 before using it.",
-  "Suggest an activity using locally available resources.":
-    "Learners could line a sloped section of the school path with grass cuttings or maize stalks already on site, then compare it with an unlined section after the next rain. No purchased materials needed. You decide whether this fits your class size and the time you have.",
-  "Show which curriculum evidence supports this section.":
-    "The activities in this draft draw on the Suggested Learning Experiences and Assessment entries from page 13 of the Grade 5 Agriculture design. Open 'View source' on either card to read the excerpt they came from.",
-  "Help me identify what I still need to decide.":
-    "Still open in this draft: how you will group learners given the limited jembes, how long the practical section should run, and which two learners you will observe closely for the participation rubric.",
-};
-
 export const teacher = {
   name: "Ms. A. Wanjiru",
   shortName: "A. Wanjiru",

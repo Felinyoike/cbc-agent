@@ -4,15 +4,14 @@ import { useState } from "react";
 import { Bot, ChevronDown, Send, Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { assistantReplies, assistantSuggestedPrompts } from "@/data/mockData";
+import { useTeachingContext } from "@/context/TeachingContext";
+import { assistantSuggestedPrompts, type EvidenceItem } from "@/data/mockData";
+import { askAssistant, describeApiError } from "@/lib/api";
 
 interface Message {
-  role: "teacher" | "assistant";
+  role: "teacher" | "assistant" | "pending" | "error";
   text: string;
 }
-
-const FALLBACK =
-  "This prototype does not call a live model. In the full product the assistant would answer using the curriculum evidence cited on this screen — and it would still be your decision what goes into the draft.";
 
 /**
  * Secondary, collapsible assistant. It never writes into the plan itself —
@@ -24,23 +23,36 @@ export function AssistantPanel({
   onOpenChange,
   title = "Planning assistant",
   context,
+  evidence = [],
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   title?: string;
   context?: string;
+  /** The curriculum evidence on this screen, sent as the assistant's grounding. */
+  evidence?: EvidenceItem[];
 }) {
+  const { grade, subject } = useTeachingContext();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [asking, setAsking] = useState(false);
 
-  const ask = (question: string) => {
-    if (!question.trim()) return;
-    setMessages((prev) => [
-      ...prev,
-      { role: "teacher", text: question },
-      { role: "assistant", text: assistantReplies[question] ?? FALLBACK },
-    ]);
+  const ask = async (question: string) => {
+    if (!question.trim() || asking) return;
+    setMessages((prev) => [...prev, { role: "teacher", text: question }, { role: "pending", text: "…" }]);
     setInput("");
+    setAsking(true);
+
+    let reply: Message;
+    try {
+      const { answer } = await askAssistant(question, grade, subject, evidence);
+      reply = { role: "assistant", text: answer };
+    } catch (error) {
+      reply = { role: "error", text: `The assistant could not answer. ${describeApiError(error)}` };
+    }
+    // Replace only the placeholder; the reply is shown here and nowhere else.
+    setMessages((prev) => prev.map((message) => (message.role === "pending" ? reply : message)));
+    setAsking(false);
   };
 
   if (!open) {
@@ -78,10 +90,16 @@ export function AssistantPanel({
           {messages.map((message, index) => (
             <div
               key={index}
+              role={message.role === "error" ? "alert" : undefined}
+              aria-busy={message.role === "pending" || undefined}
               className={
                 message.role === "teacher"
                   ? "self-end rounded-lg rounded-br-sm bg-neutral-900 px-3 py-2 text-xs text-white"
-                  : "rounded-lg border border-ai-border bg-white px-3 py-2 text-xs leading-relaxed text-neutral-800"
+                  : message.role === "error"
+                    ? "rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs leading-relaxed text-destructive"
+                    : message.role === "pending"
+                      ? "rounded-lg border border-ai-border bg-white px-3 py-2 text-xs text-muted-foreground"
+                      : "whitespace-pre-wrap rounded-lg border border-ai-border bg-white px-3 py-2 text-xs leading-relaxed text-neutral-800"
               }
             >
               {message.text}
@@ -96,6 +114,7 @@ export function AssistantPanel({
             key={prompt}
             type="button"
             onClick={() => ask(prompt)}
+            disabled={asking}
             className="rounded-full border border-border bg-white px-2.5 py-1 text-left text-xs text-neutral-700 transition-colors hover:border-ai-border hover:text-ai"
           >
             {prompt}
@@ -117,7 +136,7 @@ export function AssistantPanel({
           aria-label="Ask the planning assistant"
           className="h-9 bg-white text-sm"
         />
-        <Button type="submit" size="icon" className="size-9 shrink-0" aria-label="Send">
+        <Button type="submit" size="icon" className="size-9 shrink-0" aria-label="Send" disabled={asking}>
           <Send className="size-4" />
         </Button>
       </form>

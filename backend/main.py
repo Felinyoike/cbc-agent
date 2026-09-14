@@ -18,9 +18,9 @@ from psycopg2 import errors as pg_errors
 from psycopg2.extras import Json
 from pydantic import BaseModel
 
-from backend.chroma import SEMANTIC_AVAILABLE, collection
+from backend.chroma import collection
 from backend.db import connection as db
-from backend.parsing import UNSUPPORTED_CATEGORIES, chunk_to_evidence_items
+from backend.search import SearchFailed, search_evidence
 
 logging.basicConfig(level=logging.INFO)
 
@@ -101,61 +101,14 @@ def curriculum_options():
     }
 
 
-def _build_where(req: SearchRequest) -> dict:
-    clauses = [{"grade": req.grade}, {"subject": req.subject}]
-    if req.strand:
-        clauses.append({"strand": req.strand})
-    if req.sub_strand:
-        clauses.append({"sub_strand": req.sub_strand})
-    return clauses[0] if len(clauses) == 1 else {"$and": clauses}
-
-
 @app.post("/api/curriculum/search")
 def search_curriculum(req: SearchRequest):
-    # These three are never present in ingested chunks (see backend/parsing.py),
-    # so filtering to one of them can only ever be empty -- short-circuit before
-    # spending a Chroma call on it.
-    if req.content_type in UNSUPPORTED_CATEGORIES:
-        return {"results": [], "total": 0}
-
-    where = _build_where(req)
-    # A query we cannot embed degrades to filter-only browsing rather than failing,
-    # but the caller is told so it never mistakes filtered results for ranked ones.
-    degraded = bool(req.query) and not SEMANTIC_AVAILABLE
-    if degraded:
-        logging.warning("query %r ignored: GEMINI_API_KEY unset, filter-only results", req.query)
-
     try:
-        if req.query and SEMANTIC_AVAILABLE:
-            # Semantic search within the filtered set.
-            res = collection.query(query_texts=[req.query], where=where, n_results=20)
-            documents = res["documents"][0] if res["documents"] else []
-            metadatas = res["metadatas"][0] if res["metadatas"] else []
-        else:
-            # Pure metadata filter browsing -- no embedding call needed.
-            res = collection.get(where=where, include=["documents", "metadatas"])
-            documents = res["documents"] or []
-            metadatas = res["metadatas"] or []
-    except Exception as exc:
-        logging.exception("curriculum search failed for %s", req.model_dump())
-        if req.query and SEMANTIC_AVAILABLE:
-            # A failed embedding call (network, bad key, quota) is not "no matches" --
-            # reporting it as an empty result would hide the outage from the teacher.
-            raise HTTPException(status_code=502, detail=f"Semantic search failed: {exc}") from exc
-        # An unmatched filter must read as "no results", never as a server error.
-        return {"results": [], "total": 0}
-
-    items = []
-    for document, metadata in zip(documents, metadatas):
-        items.extend(chunk_to_evidence_items(document, metadata))
-
-    if req.content_type:
-        items = [i for i in items if i["category"] == req.content_type]
-
-    response = {"results": items, "total": len(items)}
-    if degraded:
-        response["semanticUnavailable"] = True
-    return response
+        return search_evidence(req.grade, req.subject, req.strand, req.sub_strand, req.content_type, req.query)
+    except SearchFailed as exc:
+        # A failed embedding call (network, bad key, quota) is not "no matches" --
+        # reporting it as an empty result would hide the outage from the teacher.
+        raise HTTPException(status_code=502, detail=f"Semantic search failed: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +345,40 @@ class GenerateTermPlanRequest(BaseModel):
     evidence: list[EvidenceIn]
     grade: str
     subject: str
+
+
+# ---------------------------------------------------------------------------
+# Planning assistant (conversational, advisory only)
+# ---------------------------------------------------------------------------
+
+class AssistantAskRequest(BaseModel):
+    prompt: str
+    grade: str
+    subject: str
+    # May be empty: not every question needs curriculum grounding.
+    evidence: list[EvidenceIn] = []
+
+
+@app.post("/api/assistant/ask")
+def assistant_ask(req: AssistantAskRequest):
+    if not req.prompt.strip():
+        raise HTTPException(status_code=400, detail="Ask the assistant a question first.")
+
+    try:
+        # Imported lazily for the same reason as agent.py: it requires GEMINI_API_KEY.
+        from backend.assistant import ask_assistant
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"The assistant is unavailable: {exc}") from exc
+
+    try:
+        reply = ask_assistant(req.prompt, req.grade, req.subject, [item.model_dump() for item in req.evidence])
+    except Exception as exc:
+        logging.exception("assistant request failed")
+        raise HTTPException(status_code=502, detail=f"The assistant could not answer: {exc}") from exc
+
+    if not reply["answer"]:
+        raise HTTPException(status_code=502, detail="The assistant returned an empty answer.")
+    return {"answer": reply["answer"]}
 
 
 def _num_lessons(grade: str, subject: str, strand: str, sub_strand: str) -> int:

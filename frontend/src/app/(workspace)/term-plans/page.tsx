@@ -246,6 +246,7 @@ function TermPlanWorkspace() {
                 open={assistantOpen}
                 onOpenChange={setAssistantOpen}
                 context={`${headEvidence?.subStrand} · KICD design page ${headEvidence?.page}`}
+                evidence={selectedEvidence}
               />
             </CardFooter>
           </Card>

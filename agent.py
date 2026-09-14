@@ -1,12 +1,12 @@
-import json
 import os
+import warnings
 import chromadb
-from google import genai
-from google.genai import types
 from dotenv import load_dotenv
+from strands import Agent
+from strands.models.gemini import GeminiModel
 
 from gemini_embedding import GeminiEmbeddingFunction
-from models import LessonPlan, SchemeOfWork
+from models import DailyLessonContent, LessonPlan, SchemeOfWork, TermPlanContent
 from doc_generator import create_lesson_plan_docx, create_scheme_of_work_docx
 
 # 1. Load environment variables
@@ -15,8 +15,79 @@ api_key = os.environ.get("GEMINI_API_KEY")
 if not api_key:
     raise ValueError("GEMINI_API_KEY is missing. Check your .env file.")
 
-# 2. Initialize Gemini Client
-ai_client = genai.Client(api_key=api_key)
+# Agent.structured_output is deprecated in favour of structured_output_model on a normal
+# invocation, but that path runs the agent loop with an output tool. These functions must
+# stay single, tool-free calls, so the deprecated method is kept deliberately.
+warnings.filterwarnings("ignore", message=r"Agent\.structured_output(_async)? method is deprecated",
+                        category=DeprecationWarning)
+
+
+class GeminiNoContentError(RuntimeError):
+    """Gemini returned no content; finish_reason says why (e.g. RECITATION)."""
+
+    def __init__(self, finish_reason):
+        super().__init__(f"Gemini returned no content (reason: {finish_reason})")
+        self.finish_reason = finish_reason
+
+
+class GroundedGeminiModel(GeminiModel):
+    """GeminiModel whose structured output keeps the finish reason when Gemini returns nothing.
+
+    Strands' own implementation validates response.parsed directly, so a RECITATION refusal
+    surfaces as a generic pydantic ValidationError, indistinguishable from other failures.
+    """
+
+    async def structured_output(self, output_model, prompt, system_prompt=None, **kwargs):
+        params = {
+            **(self.config.get("params") or {}),
+            "response_mime_type": "application/json",
+            "response_schema": output_model.model_json_schema(),
+        }
+        request = self._format_request(prompt, None, system_prompt, params)
+        # Hold the Client for the whole call: a temporary one is garbage-collected mid-request,
+        # closing its aiohttp session (AssertionError: self._connector is not None).
+        client = self._get_client()
+        try:
+            response = await client.aio.models.generate_content(**request)
+        finally:
+            await client.aio.aclose()
+        if not response.text:
+            candidate = response.candidates[0] if response.candidates else None
+            finish_reason = candidate.finish_reason if candidate else response.prompt_feedback
+            raise GeminiNoContentError(finish_reason)
+        yield {"output": output_model.model_validate_json(response.text)}
+
+
+# 2. Initialize the shared Gemini model
+gemini_model = GroundedGeminiModel(
+    client_args={"api_key": api_key},
+    model_id="gemini-3.1-flash-lite",
+    params={"temperature": 0.2},
+)
+
+
+def _structured_output(output_model, system_instruction: str, contents: str):
+    # A fresh Agent per call: the system prompt differs per request, and a shared Agent's
+    # prompt would race between concurrent API requests. No tools are ever registered.
+    agent = Agent(model=gemini_model, system_prompt=system_instruction, callback_handler=None)
+    return agent.structured_output(output_model, contents)
+
+
+def _is_recitation(exc: GeminiNoContentError) -> bool:
+    return "RECITATION" in str(exc.finish_reason)
+
+
+def _structured_output_with_recitation_retry(output_model, system_instruction: str,
+                                             request: str, retry_request: str):
+    # Gemini blocks near-verbatim copies of published text (finish_reason RECITATION),
+    # which KICD designs are; a retry asking for rewording stays grounded but passes.
+    try:
+        return _structured_output(output_model, system_instruction, request)
+    except GeminiNoContentError as exc:
+        if not _is_recitation(exc):
+            raise
+    return _structured_output(output_model, system_instruction, retry_request)
+
 
 # 3. Connect to the Chroma Vector Database
 CHROMA_DB_PATH = "kicd_chroma_db"
@@ -59,63 +130,8 @@ def generate_lesson_plan(prompt: str) -> LessonPlan:
     {context}
     """
     
-    
-    # We manually define the schema dictionary to match YOUR models.py exactly
-    manual_schema = {
-        "type": "OBJECT",
-        "properties": {
-            "grade": {"type": "STRING"},
-            "subject": {"type": "STRING"},
-            "strand": {"type": "STRING"},
-            "sub_strand": {"type": "STRING"},
-            "week": {"type": "INTEGER", "description": "Week number within the term/scheme"},
-            "lesson_number": {"type": "INTEGER", "description": "Lesson number within the week"},
-            "specific_learning_outcomes": {
-                "type": "ARRAY", 
-                "items": {"type": "STRING"},
-                "description": "Verbatim or lightly adapted from the KICD sub-strand outcomes"
-            },
-            "key_inquiry_question": {"type": "STRING"},
-            "core_competencies": {"type": "ARRAY", "items": {"type": "STRING"}},
-            "pcis": {
-                "type": "ARRAY", 
-                "items": {"type": "STRING"},
-                "description": "Pertinent and Contemporary Issues addressed"
-            },
-            "values": {"type": "ARRAY", "items": {"type": "STRING"}},
-            "organisation_of_learning": {
-                "type": "OBJECT",
-                "properties": {
-                    "introduction": {"type": "STRING"},
-                    "lesson_development": {"type": "STRING"},
-                    "conclusion": {"type": "STRING"}
-                },
-                "required": ["introduction", "lesson_development", "conclusion"]
-            },
-            "resources": {"type": "ARRAY", "items": {"type": "STRING"}},
-            "assessment_methods": {"type": "ARRAY", "items": {"type": "STRING"}},
-            "reflection": {"type": "STRING", "description": "Blank space/prompt for the teacher's post-lesson reflection"}
-        },
-        "required": [
-            "grade", "subject", "strand", "sub_strand", "week", "lesson_number",
-            "specific_learning_outcomes", "key_inquiry_question", "core_competencies",
-            "pcis", "values", "organisation_of_learning", "resources", "assessment_methods"
-        ]
-    }
-    
-    response = ai_client.models.generate_content(
-        model='gemini-3.1-flash-lite',
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            response_mime_type="application/json",
-            response_schema=manual_schema, 
-            temperature=0.2, 
-        ),
-    )
-    
-    # We parse the pure JSON text response back into our Pydantic object
-    return LessonPlan.model_validate_json(response.text)
+
+    return _structured_output(LessonPlan, system_instruction, prompt)
 
 
 TERM_PLAN_FIELD_SOURCES = {
@@ -152,39 +168,13 @@ def generate_term_plan_content(grade: str, subject: str, strand: str, sub_strand
     {evidence_text}
     """
 
-    manual_schema = {
-        "type": "OBJECT",
-        "properties": {field: {"type": "STRING"} for field in TERM_PLAN_FIELD_SOURCES},
-        "required": list(TERM_PLAN_FIELD_SOURCES),
-    }
-
     request = f"Organise the evidence for {sub_strand} into the scheme-of-work fields."
-    # Gemini blocks near-verbatim copies of published text (finish_reason RECITATION),
-    # which KICD designs are; a retry asking for rewording stays grounded but passes.
     retry_request = (request + " Rephrase each field in your own words rather than copying"
                      " the evidence verbatim, without adding anything new.")
 
-    response = None
-    for contents in (request, retry_request):
-        response = ai_client.models.generate_content(
-            model='gemini-3.1-flash-lite',
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                response_schema=manual_schema,
-                temperature=0.2,
-            ),
-        )
-        if response.text:
-            break
-
-    if not response.text:
-        candidate = response.candidates[0] if response.candidates else None
-        reason = candidate.finish_reason if candidate else response.prompt_feedback
-        raise RuntimeError(f"Gemini returned no content (reason: {reason})")
-
-    generated = json.loads(response.text)
+    generated = _structured_output_with_recitation_retry(
+        TermPlanContent, system_instruction, request, retry_request
+    ).model_dump()
     # Enforced here as well as in the prompt: a field with no source evidence stays empty.
     return {
         field: (str(generated.get(field) or "").strip() if category in evidence_by_category else "")
@@ -234,43 +224,13 @@ def generate_daily_lesson_content(grade: str, subject: str, strand: str, sub_str
     {row_text}
     """
 
-    manual_schema = {
-        "type": "OBJECT",
-        "properties": {
-            "introduction": {"type": "STRING"},
-            "development": {"type": "ARRAY", "items": {"type": "STRING"}},
-            "assessmentActivity": {"type": "STRING"},
-            "conclusion": {"type": "STRING"},
-        },
-        "required": ["introduction", "development", "assessmentActivity", "conclusion"],
-    }
-
     request = f"Draft one lesson for {sub_strand} from the term plan row."
-    # Same RECITATION handling as generate_term_plan_content: retry once asking for rewording.
     retry_request = (request + " Rephrase each field in your own words rather than copying"
                      " the row verbatim, without adding anything new.")
 
-    response = None
-    for contents in (request, retry_request):
-        response = ai_client.models.generate_content(
-            model='gemini-3.1-flash-lite',
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                response_schema=manual_schema,
-                temperature=0.2,
-            ),
-        )
-        if response.text:
-            break
-
-    if not response.text:
-        candidate = response.candidates[0] if response.candidates else None
-        reason = candidate.finish_reason if candidate else response.prompt_feedback
-        raise RuntimeError(f"Gemini returned no content (reason: {reason})")
-
-    generated = json.loads(response.text)
+    generated = _structured_output_with_recitation_retry(
+        DailyLessonContent, system_instruction, request, retry_request
+    ).model_dump()
     # Enforced here as well as in the prompt: a field with no source in the row stays empty.
     steps = [str(step).strip() for step in generated.get("development") or [] if str(step).strip()]
     return {

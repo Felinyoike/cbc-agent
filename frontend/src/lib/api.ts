@@ -131,6 +131,14 @@ export function generateTermPlanRows(evidence: EvidenceItem[], grade: string, su
   });
 }
 
+/** Ask the planning assistant. Advisory text only -- the caller never writes it into a draft. */
+export function askAssistant(prompt: string, grade: string, subject: string, evidence: EvidenceItem[]) {
+  return requestJson<{ answer: string }>("/api/assistant/ask", {
+    method: "POST",
+    body: JSON.stringify({ prompt, grade, subject, evidence }),
+  });
+}
+
 export interface Scheme {
   id: string;
   user_id: string;

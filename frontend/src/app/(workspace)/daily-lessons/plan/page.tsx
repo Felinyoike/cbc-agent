@@ -268,6 +268,7 @@ export default function LessonPlanPage() {
                 open={assistantOpen}
                 onOpenChange={setAssistantOpen}
                 context={sourceRow ? `${sourceRow.subStrand} · Week ${sourceRow.week}` : "No term plan row selected"}
+                evidence={lessonEvidence}
               />
             </div>
           </Card>
