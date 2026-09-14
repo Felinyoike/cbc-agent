@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+/*
+  Design tokens ported from the Flowstep prototype
+  (file f6b1d36d-b241-4471-b1e6-1ad71fee8e5b).
+
+  Semantic colour roles used across the workspace:
+    brand    — muted green, navigation + confirmed states
+    evidence — official KICD curriculum evidence (shares the brand green)
+    ai       — AI-assisted / generated content (blue)
+    draft    — drafts, pending review, action-needed (amber)
+    destructive — destructive actions and serious warnings only (red)
+*/
+@theme {
+  --color-border: oklch(0.922 0.004 286.32);
+  --color-input: oklch(0.922 0.004 286.32);
+  --color-ring: oklch(0.6 0.12 165);
+  --color-background: oklch(1 0 0);
+  --color-foreground: oklch(0.145 0.004 286.32);
+
+  --color-primary: oklch(0.45 0.07 165);
+  --color-primary-foreground: oklch(0.985 0 0);
+  --color-secondary: oklch(0.97 0.001 286.32);
+  --color-secondary-foreground: oklch(0.205 0.015 286.32);
+  --color-destructive: oklch(0.577 0.245 27.325);
+  --color-destructive-foreground: oklch(0.985 0 0);
+  --color-muted: oklch(0.97 0.001 286.32);
+  --color-muted-foreground: oklch(0.556 0.004 286.32);
+  --color-accent: oklch(0.97 0.001 286.32);
+  --color-accent-foreground: oklch(0.205 0.015 286.32);
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: oklch(0.145 0.004 286.32);
+  --color-popover: oklch(1 0 0);
+  --color-popover-foreground: oklch(0.145 0.004 286.32);
+
+  /* Warm off-white planning canvas */
+  --color-canvas: oklch(0.985 0.005 120);
+  --color-canvas-warm: oklch(0.985 0.008 95);
+
+  /* Brand / official curriculum evidence — muted green */
+  --color-brand: oklch(0.55 0.09 165);
+  --color-brand-strong: oklch(0.45 0.07 165);
+  --color-brand-ink: oklch(0.4 0.09 165);
+  --color-brand-text: oklch(0.42 0.09 165);
+  --color-brand-soft: oklch(0.93 0.03 165);
+  --color-brand-softer: oklch(0.95 0.02 165);
+  --color-brand-border: oklch(0.85 0.05 165);
+
+  /* AI-assisted content — blue */
+  --color-ai: oklch(0.45 0.09 240);
+  --color-ai-strong: oklch(0.5 0.08 240);
+  --color-ai-soft: oklch(0.93 0.02 240);
+  --color-ai-softer: oklch(0.95 0.02 240);
+  --color-ai-border: oklch(0.85 0.04 240);
+
+  /* Drafts / review required / action needed — amber */
+  --color-draft: oklch(0.6 0.12 75);
+  --color-draft-strong: oklch(0.55 0.13 65);
+  --color-draft-ink: oklch(0.42 0.1 65);
+  --color-draft-text: oklch(0.45 0.1 65);
+  --color-draft-soft: oklch(0.92 0.09 75);
+  --color-draft-surface: oklch(0.97 0.03 80);
+  --color-draft-border: oklch(0.85 0.07 75);
+
+  /* Informational callouts */
+  --color-info: oklch(0.5 0.08 215);
+  --color-info-ink: oklch(0.4 0.04 215);
+  --color-info-soft: oklch(0.96 0.02 200);
+  --color-info-border: oklch(0.85 0.05 200);
+
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.75rem;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--color-canvas);
+}
+
+/* Custom scrollbar for the wide planning tables */
+.custom-scrollbar::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: oklch(0.85 0.02 165);
+  border-radius: 20px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: oklch(0.75 0.04 165);
+}
+
+/* Inline-editable planning cells keep a visible affordance on focus */
+[contenteditable]:focus-visible,
+.editable-cell:focus-within {
+  outline: 2px solid var(--color-brand);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+}

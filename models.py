@@ -34,6 +34,23 @@ class LessonPlan(BaseModel):
     )
 
 
+class TermPlanContent(BaseModel):
+    """Scheme-of-work fields for one sub-strand, as returned by generate_term_plan_content."""
+    keyInquiryQuestion: str
+    outcomes: str
+    experiences: str
+    resources: str
+    assessment: str
+
+
+class DailyLessonContent(BaseModel):
+    """One lesson's generated sections, as returned by generate_daily_lesson_content."""
+    introduction: str
+    development: List[str]
+    assessmentActivity: str
+    conclusion: str
+
+
 class SchemeOfWorkEntry(BaseModel):
     week: int
     lesson_number: int
