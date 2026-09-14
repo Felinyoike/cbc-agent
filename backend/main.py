@@ -8,11 +8,13 @@ import logging
 import math
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from datetime import date
 from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from psycopg2 import errors as pg_errors
 from psycopg2.extras import Json
 from pydantic import BaseModel
 
@@ -240,6 +242,133 @@ def confirm_scheme(scheme_id: UUID):
             (str(scheme_id), db.demo_user_id),
         )
     return row
+
+
+# ---------------------------------------------------------------------------
+# Daily lesson plans (Postgres)
+# ---------------------------------------------------------------------------
+
+class LessonCreate(BaseModel):
+    scheme_id: Optional[UUID] = None
+    lesson_date: date
+    strand: str
+    sub_strand: str
+    # The LessonPlanDraft object, stored exactly as the frontend sends it.
+    content: dict[str, Any]
+
+
+class LessonUpdate(BaseModel):
+    content: dict[str, Any]
+    # Optional so the lesson_date column follows the draft's date instead of going stale.
+    lesson_date: Optional[date] = None
+
+
+@app.post("/api/lessons")
+def create_lesson(body: LessonCreate):
+    _require_db()
+    try:
+        with db.get_cursor() as cur:
+            # learning_outcomes/activities are NOT NULL legacy columns; content is the record.
+            cur.execute(
+                """INSERT INTO lesson_plans (scheme_id, user_id, lesson_date, strand, sub_strand,
+                                             learning_outcomes, activities, content, status)
+                   VALUES (%s, %s, %s, %s, %s, '{}', '{}', %s, 'draft') RETURNING *""",
+                (str(body.scheme_id) if body.scheme_id else None, db.demo_user_id, body.lesson_date,
+                 body.strand, body.sub_strand, Json(body.content)),
+            )
+            return cur.fetchone()
+    except pg_errors.ForeignKeyViolation as exc:
+        raise HTTPException(status_code=400, detail="The term plan this lesson belongs to was not found.") from exc
+
+
+@app.patch("/api/lessons/{lesson_id}")
+def update_lesson(lesson_id: UUID, body: LessonUpdate):
+    _require_db()
+    with db.get_cursor() as cur:
+        cur.execute(
+            """UPDATE lesson_plans SET content = %s, lesson_date = COALESCE(%s, lesson_date)
+               WHERE id = %s RETURNING *""",
+            (Json(body.content), body.lesson_date, str(lesson_id)),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Lesson plan not found")
+    return row
+
+
+@app.get("/api/lessons/{lesson_id}")
+def get_lesson(lesson_id: UUID):
+    _require_db()
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM lesson_plans WHERE id = %s", (str(lesson_id),))
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Lesson plan not found")
+    return row
+
+
+@app.post("/api/lessons/{lesson_id}/confirm")
+def confirm_lesson(lesson_id: UUID):
+    _require_db()
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE lesson_plans SET status = 'confirmed' WHERE id = %s RETURNING *",
+            (str(lesson_id),),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Lesson plan not found")
+        cur.execute(
+            """INSERT INTO confirmation_logs (entity_type, entity_id, user_id, action)
+               VALUES ('lesson_plan', %s, %s, 'confirmed')""",
+            (str(lesson_id), db.demo_user_id),
+        )
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Grounded daily-lesson generation
+# ---------------------------------------------------------------------------
+
+class GenerateLessonRequest(BaseModel):
+    grade: str
+    subject: str
+    strand: str
+    subStrand: str
+    lessons: str = ""
+    keyInquiryQuestion: str = ""
+    outcomes: str = ""
+    experiences: str = ""
+    resources: str = ""
+    assessment: str = ""
+
+
+@app.post("/api/generate/lesson-plan")
+def generate_lesson_plan_from_row(req: GenerateLessonRequest):
+    row = req.model_dump(include={"keyInquiryQuestion", "outcomes", "experiences", "resources", "assessment"})
+    if not any(value.strip() for value in row.values()):
+        raise HTTPException(status_code=400, detail="The selected term plan row has no content to plan from.")
+
+    try:
+        from agent import generate_daily_lesson_content
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Generation is unavailable: {exc}") from exc
+
+    try:
+        generated = generate_daily_lesson_content(
+            req.grade, req.subject, req.strand, req.subStrand, req.lessons, row
+        )
+    except Exception as exc:
+        logging.exception("lesson generation failed for %s / %s", req.strand, req.subStrand)
+        raise HTTPException(status_code=502, detail=f"Lesson plan generation failed: {exc}") from exc
+
+    # The row's own fields are already grounded, so they pass straight through.
+    return {
+        "keyInquiryQuestion": req.keyInquiryQuestion,
+        "outcomes": req.outcomes,
+        "resources": req.resources,
+        **generated,
+    }
 
 
 # ---------------------------------------------------------------------------

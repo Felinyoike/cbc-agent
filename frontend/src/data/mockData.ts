@@ -359,30 +359,22 @@ export interface LessonPlanDraft {
   teacherNotes: string;
 }
 
-export const initialLessonPlan: LessonPlanDraft = {
-  title: "Soil Conservation — Lesson 4",
-  date: "2026-01-28",
-  duration: "35 minutes",
-  roll: "42 learners",
-  outcomes:
-    "By the end of the lesson, the learner should be able to practise at least one appropriate method of conserving soil on the school farm.",
-  keyInquiryQuestion: "What methods can be used to conserve soil in our locality?",
-  competencies: "Communication and collaboration; Learning to learn",
-  valuesAndPcis: "Responsibility; Unity · Environmental conservation; Food security",
-  resources: "School farm, jembes and rakes, charts on soil erosion, KICD approved course book",
-  introduction:
-    "Review the previous lesson by asking learners to name the signs of soil erosion they observed around the compound (5 minutes).",
-  development: [
-    "In groups of six, learners revisit the eroded section of the school farm and agree on one conservation method to apply (8 minutes).",
-    "Groups make small terraces or lay mulch on their assigned plot while the teacher moves between groups asking guiding questions (15 minutes).",
-    "Each group explains to the class which method they used and why it suits that part of the farm (5 minutes).",
-  ],
-  assessmentActivity:
-    "Observe each group using the participation rubric and ask two oral questions per group on why the chosen method conserves soil.",
-  conclusion:
-    "Learners state one soil conservation method they will try at home and record it in their exercise books (2 minutes).",
-  teacherNotes:
-    "Jembes are limited this week — pair groups 3 and 4 to share tools. Ask the group with learners who missed Lesson 3 to start with the mulching plot.",
+/** A genuinely empty draft: new and discarded lesson plans start here, not from sample content. */
+export const emptyLessonPlan: LessonPlanDraft = {
+  title: "",
+  date: "",
+  duration: "",
+  roll: "",
+  outcomes: "",
+  keyInquiryQuestion: "",
+  competencies: "",
+  valuesAndPcis: "",
+  resources: "",
+  introduction: "",
+  development: [],
+  assessmentActivity: "",
+  conclusion: "",
+  teacherNotes: "",
 };
 
 /* ------------------------------------------------------------------ */

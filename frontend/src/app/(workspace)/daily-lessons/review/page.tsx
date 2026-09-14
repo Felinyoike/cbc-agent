@@ -3,7 +3,17 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, ArrowLeft, CheckCircle2, FileSearch, PenLine, Save, Sparkles, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  FileSearch,
+  Loader2,
+  PenLine,
+  Save,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ConfirmationDialog, DiscardDialog } from "@/components/ConfirmationDialog";
@@ -11,61 +21,102 @@ import { SourceDrawer } from "@/components/SourceDrawer";
 import { AiBadge, DraftBadge, OfficialEvidenceBadge, SourceTag, TeacherInputBadge } from "@/components/Provenance";
 import { useTeachingContext } from "@/context/TeachingContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
-import { evidenceItems, initialLessonPlan, type EvidenceItem } from "@/data/mockData";
+import type { EvidenceItem, LessonPlanDraft } from "@/data/mockData";
+import { describeApiError } from "@/lib/api";
+
+type TextField = Exclude<keyof LessonPlanDraft, "development" | "date">;
+
+const FIELD_LABELS: Record<TextField, string> = {
+  title: "Lesson title",
+  duration: "Time allocation",
+  roll: "Roll",
+  outcomes: "Specific learning outcomes",
+  keyInquiryQuestion: "Key inquiry question",
+  competencies: "Core competencies",
+  valuesAndPcis: "Values and PCIs",
+  resources: "Learning resources",
+  introduction: "Introduction / starter",
+  assessmentActivity: "Assessment activity",
+  conclusion: "Lesson closure",
+  teacherNotes: "Teacher notes",
+};
 
 export default function LessonReviewPage() {
   const router = useRouter();
   const context = useTeachingContext();
-  const { lessonPlan, confirmLessonPlan, lessonPlanConfirmed, updateLessonPlan } = useWorkspace();
+  const {
+    lessonPlan,
+    confirmLessonPlan,
+    lessonPlanConfirmed,
+    discardLessonPlan,
+    selectedTermPlanRow: sourceRow,
+    generatedLessonContent,
+    evidenceById,
+  } = useWorkspace();
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
   const [sourceItem, setSourceItem] = useState<EvidenceItem | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
 
-  const citedEvidence = evidenceItems.filter((item) =>
-    ["ev-agri-slo-13", "ev-agri-sle-13", "ev-agri-kiq-13"].includes(item.id)
+  const citedEvidence = useMemo(
+    () =>
+      (sourceRow?.evidenceIds ?? [])
+        .map((id) => evidenceById[id])
+        .filter((item): item is EvidenceItem => Boolean(item)),
+    [sourceRow, evidenceById]
   );
+  const citedPages = Array.from(new Set(citedEvidence.map((item) => item.page))).sort((a, b) => a - b);
 
-  /* Anything the teacher changed from the starting draft is reported as their
-     own input rather than folded into the AI-organised section. */
+  /* Text that differs from what generation produced. Fields generation never fills — and every
+     field, if the teacher never generated — are compared against empty, so typed text counts as
+     the teacher's own input. */
   const teacherEdits = useMemo(() => {
-    const labels: Record<string, string> = {
-      title: "Lesson title",
-      duration: "Time allocation",
-      roll: "Roll",
-      outcomes: "Specific learning outcomes",
-      keyInquiryQuestion: "Key inquiry question",
-      competencies: "Core competencies",
-      valuesAndPcis: "Values and PCIs",
-      resources: "Learning resources",
-      introduction: "Introduction / starter",
-      assessmentActivity: "Assessment activity",
-      conclusion: "Lesson closure",
-      teacherNotes: "Teacher notes",
-    };
-
-    const edits = Object.entries(labels)
-      .filter(([key]) => {
-        const current = lessonPlan[key as keyof typeof lessonPlan];
-        const original = initialLessonPlan[key as keyof typeof initialLessonPlan];
-        return typeof current === "string" && current !== original && current.trim().length > 0;
+    const edits = (Object.keys(FIELD_LABELS) as TextField[])
+      .filter((key) => {
+        const baseline = generatedLessonContent?.[key as keyof typeof generatedLessonContent] ?? "";
+        const current = lessonPlan[key];
+        return current !== baseline && current.trim().length > 0;
       })
-      .map(([key, label]) => ({ label, value: lessonPlan[key as keyof typeof lessonPlan] as string }));
+      .map((key) => ({ label: FIELD_LABELS[key], value: lessonPlan[key] }));
 
+    const steps = lessonPlan.development.filter((step) => step.trim());
     const stepsChanged =
-      JSON.stringify(lessonPlan.development) !== JSON.stringify(initialLessonPlan.development);
-    if (stepsChanged) {
-      edits.push({ label: "Main learning activities", value: `${lessonPlan.development.length} steps, edited` });
-    }
-
-    // The seeded teacher notes are genuine teacher input, so always surface them.
-    if (!edits.some((edit) => edit.label === "Teacher notes") && lessonPlan.teacherNotes.trim()) {
-      edits.push({ label: "Teacher notes", value: lessonPlan.teacherNotes });
+      JSON.stringify(lessonPlan.development) !== JSON.stringify(generatedLessonContent?.development ?? []);
+    if (stepsChanged && steps.length > 0) {
+      edits.push({
+        label: "Main learning activities",
+        value: generatedLessonContent
+          ? `${lessonPlan.development.length} steps, edited`
+          : `${steps.length} steps, entered by you`,
+      });
     }
     return edits;
-  }, [lessonPlan]);
+  }, [lessonPlan, generatedLessonContent]);
 
-  const stepMinutes = ["8 min", "15 min", "5 min", "5 min", "5 min", "5 min"];
+  /* Only what is actually in the plan: no invented timings or notes. */
+  const structureRows = [
+    { step: "Intro", activity: lessonPlan.introduction },
+    ...lessonPlan.development.map((activity, index) => ({ step: String(index + 1), activity })),
+    { step: "Close", activity: lessonPlan.conclusion },
+  ].filter((row) => row.activity.trim());
+
+  const handleConfirm = async () => {
+    setConfirmError(null);
+    if (!lessonPlan.date) {
+      setConfirmError("Set the lesson date on the plan before confirming.");
+      return;
+    }
+    setConfirming(true);
+    try {
+      await confirmLessonPlan();
+    } catch (error) {
+      setConfirmError(describeApiError(error));
+    } finally {
+      setConfirming(false);
+    }
+  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -87,20 +138,35 @@ export default function LessonReviewPage() {
                 Confirmed
               </span>
             ) : (
-              <DraftBadge>AI-assisted draft</DraftBadge>
+              <DraftBadge>{generatedLessonContent ? "AI-assisted draft" : "Teacher draft"}</DraftBadge>
             )}
           </div>
           <p className="text-sm text-muted-foreground">
-            Daily Lesson · Food Production Processes · Soil Conservation · {lessonPlan.title} · {context.grade}{" "}
-            {context.subject} · {context.className}
+            Daily Lesson
+            {sourceRow ? ` · ${sourceRow.strand} · ${sourceRow.subStrand} · Week ${sourceRow.week}` : ""}
+            {lessonPlan.title ? ` · ${lessonPlan.title}` : ""} · {context.grade} {context.subject} ·{" "}
+            {context.className}
           </p>
         </div>
+
+        {!sourceRow && (
+          <div role="alert" className="flex items-start gap-3 rounded-lg border border-draft-border bg-draft-surface px-4 py-3">
+            <AlertTriangle className="mt-0.5 size-5 shrink-0 text-draft-strong" />
+            <p className="text-sm text-draft-ink">
+              No term plan row is selected for this lesson.{" "}
+              <Link href="/daily-lessons/plan" className="font-medium underline underline-offset-2">
+                Choose one in the lesson workspace
+              </Link>{" "}
+              before confirming.
+            </p>
+          </div>
+        )}
 
         <div className="flex items-start gap-3 rounded-lg border border-draft-border bg-draft-surface px-4 py-3">
           <AlertTriangle className="mt-0.5 size-5 shrink-0 text-draft-strong" />
           <div className="flex flex-col gap-1">
             <p className="text-sm font-medium text-draft-ink">
-              This is an AI-assisted draft. Review it against the cited curriculum evidence before confirming.
+              Review this draft against the cited curriculum evidence before confirming.
             </p>
             <p className="text-xs text-draft-text">
               Nothing is saved as a teacher work product until you confirm it below.
@@ -116,12 +182,18 @@ export default function LessonReviewPage() {
             </div>
           </CardHeader>
           <CardContent className="gap-3 p-0">
+            {citedEvidence.length === 0 && (
+              <p className="text-sm text-muted-foreground">No curriculum evidence is cited by this lesson&apos;s row.</p>
+            )}
             {citedEvidence.map((item) => (
               <div key={item.id} className="flex flex-col gap-2 rounded-lg border border-brand-border bg-brand-softer/40 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <span className="text-sm font-medium text-neutral-950">{item.category}</span>
                   <SourceTag page={item.page} />
                 </div>
+                <span className="text-xs text-muted-foreground">
+                  {item.strand} › {item.subStrand}
+                </span>
                 <p className="text-sm leading-relaxed text-neutral-800">{item.content}</p>
                 <Button
                   variant="link"
@@ -140,52 +212,42 @@ export default function LessonReviewPage() {
         <Card className="gap-4 p-6">
           <CardHeader className="gap-2 p-0">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <CardTitle className="text-lg">AI-assisted organization</CardTitle>
-              <AiBadge>AI generated</AiBadge>
+              <CardTitle className="text-lg">Lesson structure</CardTitle>
+              {generatedLessonContent && <AiBadge>AI-assisted</AiBadge>}
             </div>
             <p className="text-sm text-muted-foreground">
-              How the assistant structured your lesson steps. Timings are suggestions — adjust them for your
-              class.
+              The lesson steps as they currently stand in your plan.
             </p>
           </CardHeader>
           <CardContent className="gap-0 p-0">
-            <div className="custom-scrollbar overflow-x-auto rounded-lg border border-ai-border">
-              <table className="w-full border-collapse text-sm">
-                <thead>
-                  <tr className="bg-ai-softer text-left">
-                    {["Step", "Activity", "Time", "Notes"].map((heading) => (
-                      <th key={heading} scope="col" className="border-b border-ai-border px-3 py-2 font-medium">
-                        {heading}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="align-top">
-                  <tr className="border-b border-border">
-                    <td className="px-3 py-2 font-medium">Intro</td>
-                    <td className="px-3 py-2">{lessonPlan.introduction}</td>
-                    <td className="px-3 py-2 text-muted-foreground">5 min</td>
-                    <td className="px-3 py-2 text-muted-foreground">Recalls Lesson 3</td>
-                  </tr>
-                  {lessonPlan.development.map((step, index) => (
-                    <tr key={index} className="border-b border-border">
-                      <td className="px-3 py-2 font-medium">{index + 1}</td>
-                      <td className="px-3 py-2">{step}</td>
-                      <td className="px-3 py-2 text-muted-foreground">{stepMinutes[index] ?? "—"}</td>
-                      <td className="px-3 py-2 text-muted-foreground">
-                        {index === 1 ? "Practical — supervise tool use" : "Group work"}
-                      </td>
+            {structureRows.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
+                This plan has no introduction, activities or closure yet. Go back to the lesson workspace to add
+                them or generate a starting draft from the term plan row.
+              </p>
+            ) : (
+              <div className="custom-scrollbar overflow-x-auto rounded-lg border border-ai-border">
+                <table className="w-full border-collapse text-sm">
+                  <thead>
+                    <tr className="bg-ai-softer text-left">
+                      {["Step", "Activity"].map((heading) => (
+                        <th key={heading} scope="col" className="border-b border-ai-border px-3 py-2 font-medium">
+                          {heading}
+                        </th>
+                      ))}
                     </tr>
-                  ))}
-                  <tr>
-                    <td className="px-3 py-2 font-medium">Close</td>
-                    <td className="px-3 py-2">{lessonPlan.conclusion}</td>
-                    <td className="px-3 py-2 text-muted-foreground">2 min</td>
-                    <td className="px-3 py-2 text-muted-foreground">Written record</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody className="align-top">
+                    {structureRows.map((row, index) => (
+                      <tr key={`${row.step}-${index}`} className="border-b border-border last:border-b-0">
+                        <td className="w-20 px-3 py-2 font-medium">{row.step}</td>
+                        <td className="px-3 py-2">{row.activity}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -217,6 +279,13 @@ export default function LessonReviewPage() {
             )}
           </CardContent>
         </Card>
+
+        {confirmError && (
+          <div role="alert" className="flex items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-3">
+            <AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" />
+            <p className="text-sm text-destructive">Could not confirm this lesson plan. {confirmError}</p>
+          </div>
+        )}
 
         {lessonPlanConfirmed && (
           <div className="flex items-start gap-3 rounded-lg border border-brand-border bg-brand-softer px-4 py-3">
@@ -259,9 +328,13 @@ export default function LessonReviewPage() {
             <Trash2 className="size-4" />
             Discard
           </Button>
-          <Button onClick={() => setConfirmOpen(true)} disabled={lessonPlanConfirmed} className="gap-2">
-            <Sparkles className="size-4" />
-            {lessonPlanConfirmed ? "Confirmed" : "Confirm and save"}
+          <Button
+            onClick={() => setConfirmOpen(true)}
+            disabled={lessonPlanConfirmed || confirming || !sourceRow}
+            className="gap-2"
+          >
+            {confirming ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+            {lessonPlanConfirmed ? "Confirmed" : confirming ? "Saving…" : "Confirm and save"}
           </Button>
         </div>
       </footer>
@@ -270,22 +343,22 @@ export default function LessonReviewPage() {
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
         title="Confirm this lesson plan"
-        description="You are about to store this daily lesson plan as your own teacher work product. It will appear in My Library and the lesson will be marked ready to teach."
+        description="You are about to store this daily lesson plan as your own teacher work product. It will appear in My Library."
         storedItems={[
-          `Lesson plan "${lessonPlan.title}" for ${lessonPlan.date} (${lessonPlan.duration})`,
-          `${lessonPlan.development.length} main learning activities, plus introduction, assessment and closure`,
-          `Citations to ${citedEvidence.length} curriculum evidence items (KICD design page ${citedEvidence[0]?.page})`,
-          "Your teacher notes, labelled as teacher input",
+          `Lesson plan "${lessonPlan.title || "Untitled"}" for ${lessonPlan.date || "no date set"}${lessonPlan.duration ? ` (${lessonPlan.duration})` : ""}`,
+          `${lessonPlan.development.length} main learning ${lessonPlan.development.length === 1 ? "activity" : "activities"}, plus introduction, assessment and closure`,
+          `Citations to ${citedEvidence.length} curriculum evidence ${citedEvidence.length === 1 ? "item" : "items"} (KICD design ${citedPages.length ? `pages ${citedPages.join(", ")}` : "—"})`,
+          "Your edits and notes, labelled as teacher input",
         ]}
-        onConfirm={confirmLessonPlan}
+        onConfirm={() => void handleConfirm()}
       />
 
       <DiscardDialog
         open={discardOpen}
         onOpenChange={setDiscardOpen}
-        description="This lesson draft has unsaved work. Discarding resets every field and nothing will be recorded in your library."
+        description="This lesson draft has unsaved work. Discarding clears every field and nothing will be recorded in your library."
         onConfirm={() => {
-          updateLessonPlan(initialLessonPlan);
+          discardLessonPlan();
           router.push("/daily-lessons");
         }}
       />

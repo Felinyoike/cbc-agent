@@ -1,4 +1,4 @@
-import type { EvidenceItem, TermPlanRow } from "@/data/mockData";
+import type { EvidenceItem, LessonPlanDraft, TermPlanRow } from "@/data/mockData";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -183,4 +183,65 @@ export function getScheme(id: string) {
 
 export function confirmScheme(id: string) {
   return requestJson<Scheme>(`/api/schemes/${id}/confirm`, { method: "POST" });
+}
+
+/** The term-plan row fields a lesson is generated from, plus the teaching context. */
+export type GenerateLessonInput = Pick<
+  TermPlanRow,
+  "strand" | "subStrand" | "lessons" | "keyInquiryQuestion" | "outcomes" | "experiences" | "resources" | "assessment"
+> & { grade: string; subject: string };
+
+export type GeneratedLessonPlan = Pick<
+  LessonPlanDraft,
+  "keyInquiryQuestion" | "outcomes" | "resources" | "introduction" | "development" | "assessmentActivity" | "conclusion"
+>;
+
+export function generateLessonPlan(input: GenerateLessonInput) {
+  return requestJson<GeneratedLessonPlan>("/api/generate/lesson-plan", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export interface LessonRecord {
+  id: string;
+  scheme_id: string | null;
+  user_id: string;
+  lesson_date: string;
+  strand: string;
+  sub_strand: string;
+  content: LessonPlanDraft;
+  status: "draft" | "confirmed";
+  created_at: string;
+}
+
+export interface LessonCreateInput {
+  schemeId: string | null;
+  /** ISO date (yyyy-mm-dd); the column is required. */
+  lessonDate: string;
+  strand: string;
+  subStrand: string;
+  content: LessonPlanDraft;
+}
+
+export function createLesson({ schemeId, lessonDate, strand, subStrand, content }: LessonCreateInput) {
+  return requestJson<LessonRecord>("/api/lessons", {
+    method: "POST",
+    body: JSON.stringify({ scheme_id: schemeId, lesson_date: lessonDate, strand, sub_strand: subStrand, content }),
+  });
+}
+
+export function updateLesson(id: string, content: LessonPlanDraft) {
+  return requestJson<LessonRecord>(`/api/lessons/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ content, lesson_date: content.date || undefined }),
+  });
+}
+
+export function getLesson(id: string) {
+  return requestJson<LessonRecord>(`/api/lessons/${id}`);
+}
+
+export function confirmLesson(id: string) {
+  return requestJson<LessonRecord>(`/api/lessons/${id}/confirm`, { method: "POST" });
 }

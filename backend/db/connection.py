@@ -34,6 +34,8 @@ def init_db() -> None:
     try:
         _pool = ThreadedConnectionPool(minconn=1, maxconn=10, dsn=url)
         with get_cursor() as cur:
+            # The full LessonPlanDraft lives here; the narrow TEXT[] columns have no room for it.
+            cur.execute("ALTER TABLE lesson_plans ADD COLUMN IF NOT EXISTS content JSONB")
             cur.execute("SELECT id FROM users WHERE email = %s", (DEMO_USER_EMAIL,))
             row = cur.fetchone()
             if row is None:

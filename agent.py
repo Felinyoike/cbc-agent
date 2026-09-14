@@ -191,7 +191,98 @@ def generate_term_plan_content(grade: str, subject: str, strand: str, sub_strand
         for field, category in TERM_PLAN_FIELD_SOURCES.items()
     }
 
-    
+
+DAILY_LESSON_ROW_FIELDS = {
+    "keyInquiryQuestion": "Key Inquiry Question",
+    "outcomes": "Specific Learning Outcomes",
+    "experiences": "Suggested Learning Experiences",
+    "resources": "Resources",
+    "assessment": "Assessment",
+}
+
+MAX_LESSON_STEPS = 4
+
+
+def generate_daily_lesson_content(grade: str, subject: str, strand: str, sub_strand: str,
+                                  lessons: str, row: dict[str, str]) -> dict:
+    """Drafts ONE lesson's introduction, steps, assessment and closure from a term-plan row."""
+    row = {field: str(row.get(field) or "").strip() for field in DAILY_LESSON_ROW_FIELDS}
+    row_text = "\n\n".join(
+        f"[{label}]\n{row[field]}" for field, label in DAILY_LESSON_ROW_FIELDS.items() if row[field]
+    )
+    span_note = (
+        f"This row covers lessons {lessons} of the sub-strand. Plan only ONE lesson's worth of"
+        " activity from it; do not compress every lesson in the range into this plan."
+        if "-" in lessons else "Plan a single lesson."
+    )
+
+    system_instruction = f"""You are an expert Kenyan CBC teacher.
+    Draft one daily lesson for {grade} {subject}, strand "{strand}", sub-strand "{sub_strand}",
+    from the teacher's scheme-of-work row below. {span_note}
+
+    HARD CONSTRAINTS:
+    - Use ONLY the row content below. You may rephrase and sequence it, but never add an activity,
+      resource, fact, assessment method or question that is not in the row.
+    - introduction: a short starter drawing on [Specific Learning Outcomes] / [Key Inquiry Question].
+    - development: 2 to 4 short steps, each taken from [Suggested Learning Experiences].
+    - assessmentActivity: taken from [Assessment].
+    - conclusion: a short closing tied to [Specific Learning Outcomes].
+    - If a field's source is absent from the row, return an empty string (or an empty list for
+      development) for it.
+
+    TERM PLAN ROW:
+    {row_text}
+    """
+
+    manual_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "introduction": {"type": "STRING"},
+            "development": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "assessmentActivity": {"type": "STRING"},
+            "conclusion": {"type": "STRING"},
+        },
+        "required": ["introduction", "development", "assessmentActivity", "conclusion"],
+    }
+
+    request = f"Draft one lesson for {sub_strand} from the term plan row."
+    # Same RECITATION handling as generate_term_plan_content: retry once asking for rewording.
+    retry_request = (request + " Rephrase each field in your own words rather than copying"
+                     " the row verbatim, without adding anything new.")
+
+    response = None
+    for contents in (request, retry_request):
+        response = ai_client.models.generate_content(
+            model='gemini-3.1-flash-lite',
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                response_mime_type="application/json",
+                response_schema=manual_schema,
+                temperature=0.2,
+            ),
+        )
+        if response.text:
+            break
+
+    if not response.text:
+        candidate = response.candidates[0] if response.candidates else None
+        reason = candidate.finish_reason if candidate else response.prompt_feedback
+        raise RuntimeError(f"Gemini returned no content (reason: {reason})")
+
+    generated = json.loads(response.text)
+    # Enforced here as well as in the prompt: a field with no source in the row stays empty.
+    steps = [str(step).strip() for step in generated.get("development") or [] if str(step).strip()]
+    return {
+        "introduction": (str(generated.get("introduction") or "").strip()
+                         if row["outcomes"] or row["keyInquiryQuestion"] else ""),
+        "development": steps[:MAX_LESSON_STEPS] if row["experiences"] else [],
+        "assessmentActivity": str(generated.get("assessmentActivity") or "").strip() if row["assessment"] else "",
+        "conclusion": str(generated.get("conclusion") or "").strip() if row["outcomes"] else "",
+    }
+
+
+
 if __name__ == "__main__":
     print(" CBC Agent is ready!")
     print("Type 'exit' to quit.\n")

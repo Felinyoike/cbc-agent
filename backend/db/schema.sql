@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS lesson_plans (
     learning_outcomes TEXT[] NOT NULL,
     activities TEXT[] NOT NULL,
     resources TEXT[],
+    content JSONB,
     status TEXT DEFAULT 'draft',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

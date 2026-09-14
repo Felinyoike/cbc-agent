@@ -2,9 +2,18 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTeachingContext } from "@/context/TeachingContext";
-import { confirmScheme, createScheme, generateTermPlanRows, updateScheme } from "@/lib/api";
 import {
-  initialLessonPlan,
+  confirmLesson,
+  confirmScheme,
+  createLesson,
+  createScheme,
+  generateLessonPlan,
+  generateTermPlanRows,
+  updateLesson,
+  updateScheme,
+} from "@/lib/api";
+import {
+  emptyLessonPlan,
   initialLessons,
   initialReflections,
   libraryItems as seedLibrary,
@@ -51,8 +60,17 @@ interface WorkspaceState {
   lessons: Lesson[];
   lessonPlan: LessonPlanDraft;
   updateLessonPlan: (patch: Partial<LessonPlanDraft>) => void;
+  /** The term-plan row today's lesson is planned from; undefined until the teacher picks one. */
+  selectedTermPlanRow: TermPlanRow | undefined;
+  selectTermPlanRow: (id: string) => void;
+  /** What generation produced, so review can tell teacher edits apart; undefined if never generated. */
+  generatedLessonContent: GeneratedLessonContent | undefined;
+  generateLessonFromRow: () => Promise<void>;
+  currentLessonId: string | null;
   lessonPlanConfirmed: boolean;
-  confirmLessonPlan: () => void;
+  saveLessonPlanDraft: () => Promise<void>;
+  confirmLessonPlan: () => Promise<void>;
+  discardLessonPlan: () => void;
 
   reflections: ReflectionRecord[];
   updateReflection: (id: string, patch: Partial<ReflectionRecord>) => void;
@@ -75,6 +93,11 @@ export type GeneratedRowContent = Pick<
   "keyInquiryQuestion" | "outcomes" | "experiences" | "resources" | "assessment"
 >;
 
+export type GeneratedLessonContent = Pick<
+  LessonPlanDraft,
+  "keyInquiryQuestion" | "outcomes" | "resources" | "introduction" | "development" | "assessmentActivity" | "conclusion"
+>;
+
 const WorkspaceContext = createContext<WorkspaceState | undefined>(undefined);
 
 const STORAGE_KEY = "cbc.workspace";
@@ -88,6 +111,9 @@ interface PersistedShape {
   generatedRowContent: Record<string, GeneratedRowContent>;
   lessonPlan: LessonPlanDraft;
   lessonPlanConfirmed: boolean;
+  selectedTermPlanRowId: string | null;
+  generatedLessonContent?: GeneratedLessonContent;
+  currentLessonId: string | null;
   reflections: ReflectionRecord[];
   library: LibraryItem[];
   lessons: Lesson[];
@@ -102,8 +128,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [termPlanConfirmed, setTermPlanConfirmed] = useState(false);
   const [currentSchemeId, setCurrentSchemeId] = useState<string | null>(null);
   const [lessons, setLessons] = useState<Lesson[]>(initialLessons);
-  const [lessonPlan, setLessonPlan] = useState<LessonPlanDraft>(initialLessonPlan);
+  const [lessonPlan, setLessonPlan] = useState<LessonPlanDraft>(emptyLessonPlan);
   const [lessonPlanConfirmed, setLessonPlanConfirmed] = useState(false);
+  const [selectedTermPlanRowId, setSelectedTermPlanRowId] = useState<string | null>(null);
+  const [generatedLessonContent, setGeneratedLessonContent] = useState<GeneratedLessonContent | undefined>();
+  const [currentLessonId, setCurrentLessonId] = useState<string | null>(null);
   const [reflections, setReflections] = useState<ReflectionRecord[]>(initialReflections);
   const [library, setLibrary] = useState<LibraryItem[]>(seedLibrary);
   const [contextWarning, setContextWarning] = useState<string | null>(null);
@@ -128,6 +157,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         if (parsed.generatedRowContent) setGeneratedRowContent(parsed.generatedRowContent);
         if (parsed.lessonPlan) setLessonPlan(parsed.lessonPlan);
         if (parsed.lessonPlanConfirmed !== undefined) setLessonPlanConfirmed(parsed.lessonPlanConfirmed);
+        if (parsed.selectedTermPlanRowId !== undefined) setSelectedTermPlanRowId(parsed.selectedTermPlanRowId);
+        if (parsed.generatedLessonContent) setGeneratedLessonContent(parsed.generatedLessonContent);
+        if (parsed.currentLessonId !== undefined) setCurrentLessonId(parsed.currentLessonId);
         if (parsed.reflections) setReflections(parsed.reflections);
         if (parsed.library) setLibrary(parsed.library);
         if (parsed.lessons) setLessons(parsed.lessons);
@@ -151,6 +183,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         generatedRowContent,
         lessonPlan,
         lessonPlanConfirmed,
+        selectedTermPlanRowId,
+        generatedLessonContent,
+        currentLessonId,
         reflections,
         library,
         lessons,
@@ -169,6 +204,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     generatedRowContent,
     lessonPlan,
     lessonPlanConfirmed,
+    selectedTermPlanRowId,
+    generatedLessonContent,
+    currentLessonId,
     reflections,
     library,
     lessons,
@@ -328,28 +366,116 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setLessonPlanConfirmed(false);
   }, []);
 
-  const confirmLessonPlan = useCallback(() => {
+  const selectedTermPlanRow = useMemo(
+    () => termPlanRows.find((row) => row.id === selectedTermPlanRowId),
+    [termPlanRows, selectedTermPlanRowId]
+  );
+
+  const selectTermPlanRow = useCallback((id: string) => {
+    setSelectedTermPlanRowId((prev) => {
+      if (prev !== id) {
+        // A saved lesson records its row's strand/sub-strand, so a different row is a new record.
+        setCurrentLessonId(null);
+        setLessonPlanConfirmed(false);
+      }
+      return id;
+    });
+  }, []);
+
+  const generateLessonFromRow = useCallback(async () => {
+    const row = selectedTermPlanRow;
+    if (!row) throw new Error("No term plan row selected");
+    const sourceEvidence = row.evidenceIds.map((id) => evidenceById[id]).find(Boolean);
+    const generated = await generateLessonPlan({
+      // Evidence carries the grade/subject the row was built from; the teaching context is a fallback.
+      grade: sourceEvidence?.grade ?? teaching.grade,
+      subject: sourceEvidence?.subject ?? teaching.subject,
+      strand: row.strand,
+      subStrand: row.subStrand,
+      lessons: row.lessons,
+      keyInquiryQuestion: row.keyInquiryQuestion,
+      outcomes: row.outcomes,
+      experiences: row.experiences,
+      resources: row.resources,
+      assessment: row.assessment,
+    });
+    setGeneratedLessonContent(generated);
+    setLessonPlan((prev) => ({ ...prev, ...generated }));
+    setLessonPlanConfirmed(false);
+  }, [selectedTermPlanRow, evidenceById, teaching.grade, teaching.subject]);
+
+  /** Creates the lesson on first save, updates it afterwards; resolves to its id. */
+  const persistLesson = useCallback(
+    async (plan: LessonPlanDraft) => {
+      if (currentLessonId) {
+        await updateLesson(currentLessonId, plan);
+        return currentLessonId;
+      }
+      if (!selectedTermPlanRow) throw new Error("No term plan row selected");
+      const created = await createLesson({
+        schemeId: currentSchemeId,
+        lessonDate: plan.date,
+        strand: selectedTermPlanRow.strand,
+        subStrand: selectedTermPlanRow.subStrand,
+        content: plan,
+      });
+      setCurrentLessonId(created.id);
+      return created.id;
+    },
+    [currentLessonId, currentSchemeId, selectedTermPlanRow]
+  );
+
+  const saveLessonPlanDraft = useCallback(async () => {
+    await persistLesson(lessonPlan);
+  }, [persistLesson, lessonPlan]);
+
+  const confirmLessonPlan = useCallback(async () => {
+    // Save first so the confirmed record holds exactly what the teacher reviewed.
+    const lessonId = await persistLesson(lessonPlan);
+    await confirmLesson(lessonId);
+
     setLessonPlanConfirmed(true);
-    setLessons((prev) =>
-      prev.map((lesson) => (lesson.id === "lesson-4" ? { ...lesson, status: "ready" as const } : lesson))
-    );
+    const row = selectedTermPlanRow;
+    const citedIds = row?.evidenceIds ?? [];
     setLibrary((prev) => [
       {
         id: `lib-${Date.now()}`,
         type: "Lesson Plan",
-        title: lessonPlan.title,
-        grade: "Grade 5",
-        subject: "Agriculture",
-        term: "Term 1",
-        className: "5 East",
+        title: lessonPlan.title.trim() || (row ? `${row.subStrand} — Week ${row.week}` : "Daily lesson plan"),
+        grade: teaching.grade,
+        subject: teaching.subject,
+        term: teaching.term,
+        className: teaching.className,
         updated: new Date().toISOString().slice(0, 10),
         version: "v1",
-        evidenceCount: 3,
-        pages: [13],
+        evidenceCount: citedIds.length,
+        pages: Array.from(
+          new Set(
+            citedIds
+              .map((id) => evidenceById[id]?.page)
+              .filter((page): page is number => typeof page === "number")
+          )
+        ).sort((a, b) => a - b),
       },
       ...prev,
     ]);
-  }, [lessonPlan.title]);
+  }, [
+    persistLesson,
+    lessonPlan,
+    selectedTermPlanRow,
+    evidenceById,
+    teaching.grade,
+    teaching.subject,
+    teaching.term,
+    teaching.className,
+  ]);
+
+  const discardLessonPlan = useCallback(() => {
+    setLessonPlan(emptyLessonPlan);
+    setGeneratedLessonContent(undefined);
+    setCurrentLessonId(null);
+    setLessonPlanConfirmed(false);
+  }, []);
 
   const updateReflection = useCallback((id: string, patch: Partial<ReflectionRecord>) => {
     setReflections((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
@@ -448,8 +574,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     lessons,
     lessonPlan,
     updateLessonPlan,
+    selectedTermPlanRow,
+    selectTermPlanRow,
+    generatedLessonContent,
+    generateLessonFromRow,
+    currentLessonId,
     lessonPlanConfirmed,
+    saveLessonPlanDraft,
     confirmLessonPlan,
+    discardLessonPlan,
     reflections,
     updateReflection,
     setReflectionEvidence,
