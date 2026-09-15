@@ -38,7 +38,7 @@ export function MobileNav() {
           >
             <Icon className="size-5" />
             {label}
-            {label === "Reflect" && pendingReflectionCount > 0 && (
+            {label === "Reflect" && pendingReflectionCount !== null && pendingReflectionCount > 0 && (
               <span className="absolute right-1/4 top-1 size-2 rounded-full bg-draft" />
             )}
           </Link>

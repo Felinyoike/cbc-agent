@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTeachingContext } from "@/context/TeachingContext";
 import {
   confirmLesson,
@@ -9,8 +9,10 @@ import {
   createScheme,
   generateLessonPlan,
   generateTermPlanRows,
+  getReflections,
   updateLesson,
   updateScheme,
+  type ReflectionListItem,
 } from "@/lib/api";
 import {
   emptyLessonPlan,
@@ -77,7 +79,12 @@ interface WorkspaceState {
   hasReflectionEvidence: (id: string) => boolean;
   confirmReflection: (id: string) => boolean;
 
-  pendingReflectionCount: number;
+  /** Confirmed lesson plans without a confirmed reflection, from the reflections API (newest lesson first). */
+  pendingReflections: ReflectionListItem[];
+  /** Null until the reflections API has answered, or if it failed: a count is never invented. */
+  pendingReflectionCount: number | null;
+  /** Reloads the pending reflections; the app shell calls it on every navigation. */
+  refreshReflections: () => void;
   draftCount: number;
 
   /** Raised when the teacher changes grade/subject while drafts exist. */
@@ -131,6 +138,21 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [currentLessonId, setCurrentLessonId] = useState<string | null>(null);
   const [reflections, setReflections] = useState<ReflectionRecord[]>(initialReflections);
   const [contextWarning, setContextWarning] = useState<string | null>(null);
+  const [pendingReflections, setPendingReflections] = useState<ReflectionListItem[] | null>(null);
+  const reflectionsRequest = useRef<AbortController | null>(null);
+
+  const refreshReflections = useCallback(() => {
+    // Only the latest request may update the counts.
+    reflectionsRequest.current?.abort();
+    const controller = new AbortController();
+    reflectionsRequest.current = controller;
+    getReflections(controller.signal)
+      .then(({ items }) => setPendingReflections(items.filter((item) => item.status !== "confirmed")))
+      .catch(() => {
+        // Unknown rather than stale or made up: the badges hide until the API answers again.
+        if (!controller.signal.aborted) setPendingReflections(null);
+      });
+  }, []);
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
@@ -398,7 +420,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
     // The Library reads confirmed lesson plans from Postgres, so nothing is recorded locally here.
     setLessonPlanConfirmed(true);
-  }, [persistLesson, lessonPlan]);
+    // A newly confirmed lesson plan now awaits a reflection.
+    refreshReflections();
+  }, [persistLesson, lessonPlan, refreshReflections]);
 
   const discardLessonPlan = useCallback(() => {
     setLessonPlan(emptyLessonPlan);
@@ -457,10 +481,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [reflections]
   );
 
-  const pendingReflectionCount = useMemo(
-    () => reflections.filter((r) => r.status !== "confirmed").length,
-    [reflections]
-  );
 
   const draftCount = useMemo(
     () => termPlanRows.filter((row) => row.status === "draft").length,
@@ -503,7 +523,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setOutcomeStatus,
     hasReflectionEvidence,
     confirmReflection,
-    pendingReflectionCount,
+    pendingReflections: pendingReflections ?? [],
+    pendingReflectionCount: pendingReflections ? pendingReflections.length : null,
+    refreshReflections,
     draftCount,
     contextWarning,
     setContextWarning,

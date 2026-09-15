@@ -23,7 +23,7 @@ import { teacher } from "@/data/mockData";
 export function Header() {
   const router = useRouter();
   const context = useTeachingContext();
-  const { pendingReflectionCount, draftCount } = useWorkspace();
+  const { pendingReflections, pendingReflectionCount, draftCount } = useWorkspace();
   const [openMenu, setOpenMenu] = useState<"none" | "notifications" | "profile">("none");
   const [query, setQuery] = useState("");
   const headerRef = useRef<HTMLElement>(null);
@@ -46,7 +46,9 @@ export function Header() {
     };
   }, [openMenu]);
 
-  const notificationCount = pendingReflectionCount + draftCount;
+  const reflectionCount = pendingReflectionCount ?? 0;
+  const notificationCount = reflectionCount + draftCount;
+  const nextReflection = pendingReflections[0];
 
   const submitSearch = (event: React.FormEvent) => {
     event.preventDefault();
@@ -124,7 +126,7 @@ export function Header() {
                     </div>
                   </Link>
                 )}
-                {pendingReflectionCount > 0 && (
+                {reflectionCount > 0 && (
                   <Link
                     href="/reflections"
                     onClick={() => setOpenMenu("none")}
@@ -133,10 +135,14 @@ export function Header() {
                     <CalendarClock className="mt-0.5 size-4 text-draft" />
                     <div className="flex flex-col">
                       <span className="text-xs font-medium text-neutral-950">
-                        {pendingReflectionCount} {pendingReflectionCount === 1 ? "lesson" : "lessons"} awaiting
-                        reflection
+                        {reflectionCount} {reflectionCount === 1 ? "lesson" : "lessons"} awaiting reflection
                       </span>
-                      <span className="text-[11px] text-muted-foreground">Soil Conservation</span>
+                      {nextReflection && (
+                        <span className="text-[11px] text-muted-foreground">
+                          {nextReflection.lessonTitle}
+                          {reflectionCount > 1 ? ` and ${reflectionCount - 1} more` : ""}
+                        </span>
+                      )}
                     </div>
                   </Link>
                 )}
