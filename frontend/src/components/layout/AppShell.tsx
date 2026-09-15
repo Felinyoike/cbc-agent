@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, type ReactNode } from "react";
-import { usePathname } from "next/navigation";
+import type { ReactNode } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { Header } from "./Header";
 import { Sidebar } from "./Sidebar";
@@ -9,14 +8,7 @@ import { MobileNav } from "./MobileNav";
 import { useWorkspace } from "@/context/WorkspaceContext";
 
 export function AppShell({ children }: { children: ReactNode }) {
-  const pathname = usePathname();
-  const { contextWarning, setContextWarning, refreshReflections } = useWorkspace();
-
-  // The reflection counts in the sidebar, header and dashboard follow Postgres: reload them on
-  // every navigation so they catch lesson plans and reflections confirmed on other screens.
-  useEffect(() => {
-    refreshReflections();
-  }, [pathname, refreshReflections]);
+  const { contextWarning, setContextWarning } = useWorkspace();
 
   return (
     <div className="flex h-dvh w-full bg-white text-neutral-950">

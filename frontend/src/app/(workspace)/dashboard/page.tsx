@@ -72,16 +72,14 @@ const recentCurriculum = [
 
 export default function DashboardPage() {
   const context = useTeachingContext();
-  const { termPlanRows, pendingReflections, pendingReflectionCount, lessons } = useWorkspace();
+  const { termPlanRows, pendingReflectionCount, lessons, reflections } = useWorkspace();
 
   const reviewedRows = termPlanRows.filter((row) => row.status !== "draft").length;
   const reviewedPercent = termPlanRows.length
     ? Math.round((reviewedRows / termPlanRows.length) * 100)
     : 0;
   const draftedLessons = lessons.filter((lesson) => lesson.status !== "reflected").length;
-  /* Real data from the reflections API: confirmed lesson plans still awaiting a confirmed reflection. */
-  const nextReflection = pendingReflections[0];
-  const reflectionCount = pendingReflectionCount ?? 0;
+  const nextReflection = reflections.find((record) => record.status !== "confirmed");
 
   return (
     <main className="flex flex-1 flex-col gap-8 overflow-y-auto bg-canvas p-4 md:p-8">
@@ -141,7 +139,7 @@ export default function DashboardPage() {
         ))}
       </section>
 
-      {reflectionCount > 0 && (
+      {pendingReflectionCount > 0 && (
         <section>
           <Card className="gap-4 border-draft-border bg-draft-surface p-6">
             <CardContent className="flex flex-col items-start gap-5 p-0 md:flex-row md:items-center">
@@ -156,7 +154,7 @@ export default function DashboardPage() {
                   </span>
                 </div>
                 <p className="text-sm leading-snug text-draft-text">
-                  {reflectionCount} confirmed {reflectionCount === 1 ? "lesson plan is" : "lesson plans are"}{" "}
+                  {pendingReflectionCount} delivered {pendingReflectionCount === 1 ? "lesson is" : "lessons are"}{" "}
                   awaiting your post-lesson evidence. Record outcomes based on what learners said or did.
                 </p>
               </div>
@@ -215,21 +213,10 @@ export default function DashboardPage() {
                     <CalendarClock className="size-3" />
                     Awaiting reflection
                   </span>
-                  {nextReflection && (
-                    <span className="text-xs text-muted-foreground">
-                      {nextReflection.status === "draft"
-                        ? "Reflection draft"
-                        : nextReflection.lessonDate
-                          ? `Lesson date ${formatDate(nextReflection.lessonDate)}`
-                          : ""}
-                    </span>
-                  )}
+                  <span className="text-xs text-muted-foreground">Taught yesterday</span>
                 </div>
                 <CardTitle className="text-sm leading-snug">
-                  {nextReflection?.lessonTitle ??
-                    (pendingReflectionCount === null
-                      ? "Reflections could not be loaded"
-                      : "No lesson awaiting reflection")}
+                  {nextReflection?.lessonTitle ?? "No lesson awaiting reflection"}
                 </CardTitle>
               </CardHeader>
               <CardContent className="gap-3 p-0">
@@ -310,8 +297,8 @@ export default function DashboardPage() {
                 <SummaryRow label="Lessons drafted" value={String(draftedLessons)} />
                 <SummaryRow
                   label="Reflections pending"
-                  value={pendingReflectionCount === null ? "—" : String(pendingReflectionCount)}
-                  emphasis={reflectionCount > 0}
+                  value={String(pendingReflectionCount)}
+                  emphasis={pendingReflectionCount > 0}
                 />
               </div>
             </CardContent>
@@ -333,10 +320,6 @@ export default function DashboardPage() {
       </div>
     </main>
   );
-}
-
-function formatDate(value: string) {
-  return new Date(`${value}T00:00:00`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
 function SummaryRow({ label, value, emphasis }: { label: string; value: string; emphasis?: boolean }) {

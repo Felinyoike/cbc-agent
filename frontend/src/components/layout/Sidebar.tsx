@@ -56,7 +56,7 @@ export function Sidebar() {
             >
               <Icon className="size-[18px] shrink-0" />
               <span>{label}</span>
-              {label === "Reflections" && pendingReflectionCount !== null && pendingReflectionCount > 0 && (
+              {label === "Reflections" && pendingReflectionCount > 0 && (
                 <span className="ml-auto rounded-full bg-draft-soft px-1.5 text-xs font-semibold text-draft-text">
                   {pendingReflectionCount}
                 </span>

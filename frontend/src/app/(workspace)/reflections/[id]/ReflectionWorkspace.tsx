@@ -101,7 +101,7 @@ type LoadState = "loading" | "ready" | "not-found" | "not-confirmed" | "error";
 /** `id` is the confirmed lesson plan's id; its reflection record is created on first save. */
 export function ReflectionWorkspace({ id }: { id: string }) {
   const router = useRouter();
-  const { evidenceById, refreshReflections } = useWorkspace();
+  const { evidenceById } = useWorkspace();
 
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -276,8 +276,6 @@ export function ReflectionWorkspace({ id }: { id: string }) {
       const saved = await persist({ evidence, outcomeStatus });
       const confirmed = await confirmReflectionRecord(saved.id);
       setStatus(confirmed.status);
-      // This lesson no longer awaits a reflection: update the badges straight away.
-      refreshReflections();
     } catch (error) {
       setBlockedReason(`Could not confirm this record. ${describeApiError(error)}`);
     } finally {
