@@ -83,6 +83,11 @@ export async function searchCurriculum({
   return response.json();
 }
 
+/** Subjects with ingested curriculum for this grade (Arabic, say, exists only for Grade 4). */
+export function subjectsForGrade(options: CurriculumOptions, grade: string): string[] {
+  return options.subjects.filter((subject) => `${grade}|${subject}` in options.strandsByGradeSubject);
+}
+
 export async function getCurriculumOptions(signal?: AbortSignal): Promise<CurriculumOptions> {
   const response = await fetch(`${BASE_URL}/api/curriculum/options`, { signal });
   if (!response.ok) {

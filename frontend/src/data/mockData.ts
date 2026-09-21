@@ -217,8 +217,6 @@ export const contentCategories: ContentCategory[] = [
   "Assessment",
 ];
 
-export const grades = ["Grade 4", "Grade 5", "Grade 6", "Grade 7"];
-export const subjects = ["Agriculture", "Mathematics", "English", "Science & Technology"];
 export const terms = ["Term 1", "Term 2", "Term 3"];
 export const academicYears = ["2025", "2026", "2027"];
 export const classes = ["5 East", "5 West", "5 North", "5 South"];

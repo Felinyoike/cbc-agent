@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
@@ -10,6 +10,8 @@ import {
   Compass,
   GraduationCap,
   Info,
+  Loader2,
+  RotateCw,
   Sprout,
   Users,
 } from "lucide-react";
@@ -18,9 +20,21 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatContext, useTeachingContext } from "@/context/TeachingContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
-import { academicYears, classes, grades, subjects, terms } from "@/data/mockData";
+import { academicYears, classes, terms } from "@/data/mockData";
+import { getCurriculumOptions, subjectsForGrade, type CurriculumOptions } from "@/lib/api";
 
 export default function SetupPage() {
+  const context = useTeachingContext();
+  // The form seeds its draft from the teaching context once, on mount -- so it
+  // must not mount until the saved context has been read from storage, or it
+  // shows the built-in defaults instead of what the teacher chose last time.
+  if (!context.isLoaded) {
+    return <div className="min-h-dvh w-full bg-canvas-warm" />;
+  }
+  return <SetupForm />;
+}
+
+function SetupForm() {
   const router = useRouter();
   const context = useTeachingContext();
   const { setContextWarning, selectedEvidence, draftCount } = useWorkspace();
@@ -32,6 +46,43 @@ export default function SetupPage() {
     year: context.year,
     className: context.className,
   });
+
+  // Grade and subject come from the curriculum that is actually ingested, so a
+  // teacher can never pick a combination with nothing behind it.
+  const [options, setOptions] = useState<CurriculumOptions | null>(null);
+  const [optionsFailed, setOptionsFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getCurriculumOptions(controller.signal)
+      .then((fetched) => {
+        setOptions(fetched);
+        setOptionsFailed(false);
+        // A saved context may name a grade or subject with no data (from an
+        // older list, or a design since removed): move it to one that exists.
+        setDraft((d) => {
+          const grade = fetched.grades.includes(d.grade) ? d.grade : fetched.grades[0] ?? "";
+          const available = subjectsForGrade(fetched, grade);
+          return { ...d, grade, subject: available.includes(d.subject) ? d.subject : available[0] ?? "" };
+        });
+      })
+      .catch((error) => {
+        if (error?.name !== "AbortError") setOptionsFailed(true);
+      });
+    return () => controller.abort();
+  }, [attempt]);
+
+  const gradeOptions = options?.grades ?? [];
+  const subjectOptions = options ? subjectsForGrade(options, draft.grade) : [];
+  const optionsReady = options !== null && Boolean(draft.grade) && Boolean(draft.subject);
+
+  const handleGradeChange = (grade: string) => {
+    setDraft((d) => {
+      const available = options ? subjectsForGrade(options, grade) : [];
+      return { ...d, grade, subject: available.includes(d.subject) ? d.subject : available[0] ?? "" };
+    });
+  };
 
   const isReturning = context.isConfigured;
   const changesScope = isReturning && (draft.grade !== context.grade || draft.subject !== context.subject);
@@ -86,12 +137,12 @@ export default function SetupPage() {
 
           <CardContent className="grid grid-cols-1 gap-x-6 gap-y-5 p-0 sm:grid-cols-2">
             <Field icon={<GraduationCap className="size-4 text-brand" />} label="Grade">
-              <Select value={draft.grade} onValueChange={(grade) => setDraft((d) => ({ ...d, grade }))}>
+              <Select value={options ? draft.grade : ""} onValueChange={handleGradeChange} disabled={!options}>
                 <SelectTrigger className="w-full rounded-lg">
-                  <SelectValue placeholder="Select grade" />
+                  <SelectValue placeholder={options ? "Select grade" : "Loading…"} />
                 </SelectTrigger>
                 <SelectContent>
-                  {grades.map((grade) => (
+                  {gradeOptions.map((grade) => (
                     <SelectItem key={grade} value={grade}>
                       {grade}
                     </SelectItem>
@@ -101,12 +152,16 @@ export default function SetupPage() {
             </Field>
 
             <Field icon={<BookOpen className="size-4 text-brand" />} label="Subject / Learning Area">
-              <Select value={draft.subject} onValueChange={(subject) => setDraft((d) => ({ ...d, subject }))}>
+              <Select
+                value={options ? draft.subject : ""}
+                onValueChange={(subject) => setDraft((d) => ({ ...d, subject }))}
+                disabled={!options}
+              >
                 <SelectTrigger className="w-full rounded-lg">
-                  <SelectValue placeholder="Select subject" />
+                  <SelectValue placeholder={options ? "Select subject" : "Loading…"} />
                 </SelectTrigger>
                 <SelectContent>
-                  {subjects.map((subject) => (
+                  {subjectOptions.map((subject) => (
                     <SelectItem key={subject} value={subject}>
                       {subject}
                     </SelectItem>
@@ -166,14 +221,36 @@ export default function SetupPage() {
             </div>
           </CardContent>
 
+          {optionsFailed ? (
+            <div className="flex items-start gap-2.5 rounded-lg border border-draft-border bg-draft-surface p-4">
+              <Info className="mt-0.5 size-4 shrink-0 text-draft-strong" />
+              <div className="flex flex-1 flex-col items-start gap-2">
+                <p className="text-xs leading-relaxed text-draft-text">
+                  Could not load the list of available grades and subjects. Check that the backend is running,
+                  then try again.
+                </p>
+                <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setAttempt((n) => n + 1)}>
+                  <RotateCw className="size-3.5" />
+                  Try again
+                </Button>
+              </div>
+            </div>
+          ) : !options ? (
+            <div className="flex items-center gap-2.5 rounded-lg border border-info-border bg-info-soft p-4">
+              <Loader2 className="size-4 shrink-0 animate-spin text-info" />
+              <p className="text-xs leading-relaxed text-info-ink">Loading the grades and subjects with curriculum data…</p>
+            </div>
+          ) : (
           <div className="flex items-start gap-2.5 rounded-lg border border-info-border bg-info-soft p-4">
             <Info className="mt-0.5 size-4 shrink-0 text-info" />
             <p className="text-xs leading-relaxed text-info-ink">
               You are setting up{" "}
               <span className="font-medium text-neutral-800">{formatContext(draft)}</span>. Curriculum
-              evidence and drafts across the workspace will be filtered to this context.
+              evidence and drafts across the workspace will be filtered to this context. Only grades and
+              subjects with KICD curriculum designs loaded are listed.
             </p>
           </div>
+          )}
 
           {changesScope && hasWork && (
             <div className="flex items-start gap-2.5 rounded-lg border border-draft-border bg-draft-surface p-4">
@@ -198,6 +275,7 @@ export default function SetupPage() {
             </Button>
             <Button
               onClick={handleContinue}
+              disabled={!optionsReady}
               className="w-full gap-2 rounded-lg px-6 sm:w-auto"
             >
               Continue to workspace
