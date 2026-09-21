@@ -7,6 +7,10 @@ canonical subject names using collection.update(), which rewrites metadata only
 -- documents and embeddings are untouched, so nothing is re-embedded.
 
 Safe to re-run: chunks already carrying a canonical subject are skipped.
+
+SUPERSEDED: ingest.py now normalises subject names itself (CANONICAL_SUBJECTS),
+so a fresh ingest never produces these values. Kept only for stores ingested
+before that change.
 """
 import chromadb
 

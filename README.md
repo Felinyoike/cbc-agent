@@ -147,6 +147,18 @@ lesson counts) and embedded into the `kicd_curriculum` collection. Core
 competencies, values and PCIs are not present in the source tables, so they are
 not ingested and are never generated.
 
+Re-running is safe and cheap: chunks already stored unchanged are skipped, a
+file's outdated chunks are removed only after its new ones are written, and
+Gemini rate limits are waited out. `python ingest.py --dry-run` shows what each
+file parses to without embedding anything. Subject names are normalised in
+`ingest.py` (`CANONICAL_SUBJECTS`), so add a new subject there when you add its
+design. Designs whose tables the standard parser cannot read (currently the
+three CRE designs) go through a more tolerant parser automatically.
+
+Ingested today: Agriculture, Creative Arts, English and Christian Religious
+Education for Grades 4–6, Indigenous Languages for Grades 5–6, and Arabic for
+Grade 4.
+
 The embedding provider used here must match the one the API searches with (see
 [Model providers](#model-providers)).
 
@@ -295,8 +307,12 @@ python agent.py
 - Bedrock support is partial (see [Model providers](#model-providers)): the
   assistant and API search are Gemini-only, and Bedrock is selected whenever
   `AWS_DEFAULT_REGION` or `BEDROCK_MODEL_ID` alone is set.
-- `ingest.py` waits 0.5 seconds between batches, which may hit Gemini embedding
-  rate limits on a full ingest.
+- A full ingest from an empty store hits Gemini's per-minute embedding quota;
+  `ingest.py` waits and retries, so it takes a few minutes.
+- The CRE designs' source tables are damaged in places, so a few CRE chunks
+  carry stray words at the end of a key inquiry question, one Grade 5 outcome
+  (3.2) has scrambled word order, and two learning-experience lists (Grade 5
+  3.2 and 5.2) are cut short.
 - `docker-compose.yml` is empty; Postgres is started with the `docker run`
   command above.
 
