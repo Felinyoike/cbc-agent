@@ -25,7 +25,10 @@ and nothing is saved as confirmed work until the teacher explicitly confirms it.
   draft.
 - **Reflections:** every confirmed lesson plan needs a reflection. The teacher
   records evidence under five prompts, can generate an AI summary of those notes,
-  chooses the outcome status, and confirms.
+  chooses the outcome status, and confirms. A confirmed reflection becomes part
+  of its lesson plan: it is shown on the lesson's review page, printed in the
+  Reflection section of the lesson's Word download (which is left blank for
+  handwriting until then), and marked "Included" on the lesson in My Library.
 - **My Library and downloads:** confirmed schemes and lesson plans, read from
   Postgres, each downloadable as a `.docx`.
 
@@ -159,6 +162,14 @@ Ingested today: Agriculture, Creative Arts, English and Christian Religious
 Education for Grades 4–6, Indigenous Languages for Grades 5–6, and Arabic for
 Grade 4.
 
+English and Indigenous Languages have a level above the strand: Theme →
+Strand → Sub-strand (e.g. "1.0 The Family" → "1.1 Listening and Speaking" →
+"1.1.1 Pronunciation and Vocabulary"). Their chunks carry a `theme` field and a
+`Theme:` line, and the Curriculum Explorer shows a Theme filter for them only.
+The theme is read from the design's contents and headings and matched to strands
+by number. Arabic lists themes too, but numbers its strands independently
+("2.0 Reading"), so it is left without them.
+
 The embedding provider used here must match the one the API searches with (see
 [Model providers](#model-providers)).
 
@@ -255,8 +266,8 @@ Bedrock configuration variables: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | Status and Chroma chunk count |
-| GET | `/api/curriculum/options` | Grade/subject/strand/sub-strand values that exist in the store |
-| POST | `/api/curriculum/search` | Filter and optional semantic search; returns evidence items |
+| GET | `/api/curriculum/options` | Grade/subject/theme/strand/sub-strand values that exist in the store |
+| POST | `/api/curriculum/search` | Filter (including `theme`) and optional semantic search; returns evidence items |
 | POST | `/api/generate/term-plan-rows` | Grounded week rows from selected evidence |
 | POST | `/api/generate/lesson-plan` | Grounded daily lesson draft from one term-plan row |
 | POST | `/api/generate/reflection-summary` | Plain-text summary of reflection evidence (400 if all fields are empty) |
@@ -266,15 +277,15 @@ Bedrock configuration variables: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 | POST | `/api/schemes/{id}/confirm` | Confirm a scheme and write a confirmation log |
 | GET | `/api/schemes/{id}/download` | Scheme of work as `.docx` |
 | POST | `/api/lessons` | Create a draft lesson plan |
-| GET / PATCH | `/api/lessons/{id}` | Read / update a lesson plan |
+| GET / PATCH | `/api/lessons/{id}` | Read (with its `reflection`, or null) / update a lesson plan |
 | POST | `/api/lessons/{id}/confirm` | Confirm a lesson plan and write a confirmation log |
-| GET | `/api/lessons/{id}/download` | Lesson plan as `.docx` (with scheme context when linked) |
-| GET | `/api/library` | Confirmed schemes and lesson plans, most recently updated first |
+| GET | `/api/lessons/{id}/download` | Lesson plan as `.docx` (with scheme context when linked, and its confirmed reflection) |
+| GET | `/api/library` | Confirmed schemes and lesson plans (with each lesson's `reflectionStatus`), most recently updated first |
 | GET | `/api/reflections` | Confirmed lesson plans with their reflection status (`not_started`, `draft`, `confirmed`) |
 | GET | `/api/reflections/by-lesson/{lesson_id}` | A lesson's reflection, or `{ "reflection": null }` |
 | POST | `/api/reflections` | Create a draft reflection for a confirmed lesson plan |
 | PATCH | `/api/reflections/{id}` | Update a draft reflection's evidence, status and summary |
-| POST | `/api/reflections/{id}/confirm` | Confirm a reflection and write a confirmation log |
+| POST | `/api/reflections/{id}/confirm` | Confirm a reflection, mark its lesson plan updated, and write a confirmation log |
 
 Reflection rules are enforced by the server, not only the UI:
 
@@ -313,6 +324,10 @@ python agent.py
   carry stray words at the end of a key inquiry question, one Grade 5 outcome
   (3.2) has scrambled word order, and two learning-experience lists (Grade 5
   3.2 and 5.2) are cut short.
+- Some language sub-strands are not ingested: Indigenous Languages Grade 5
+  7.1 and Grade 6 1.1, 4.1, 6.1 and 9.1 (their tables have "THEME N:" merged into
+  the header row), and English Grade 6 yields 29 sub-strands from 43 curriculum
+  tables, one of them shifted a column (strand "8.2.1 Fluency ...").
 - `docker-compose.yml` is empty; Postgres is started with the `docker run`
   command above.
 

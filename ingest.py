@@ -47,6 +47,7 @@ import os
 import re
 import sys
 import time
+import difflib
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -151,6 +152,109 @@ def canonical_subject(raw: str) -> str:
     print(f"  (!) No canonical name for subject {raw!r} -- stored as is. "
           f"Add it to CANONICAL_SUBJECTS if it is wrong.")
     return raw
+
+
+# ---------------------------------------------------------------------------
+# Themes (English and Indigenous Languages)
+#
+# The language designs have one more level than the others: Theme -> Strand ->
+# Sub-strand, e.g. "THEME 1.0 THE FAMILY" -> "1.1 Listening and Speaking" ->
+# "1.1.1 Pronunciation and Vocabulary". The curriculum tables only carry the
+# strand, but every strand number starts with its theme's number, and the theme
+# names are in the table of contents and the section headings.
+# ---------------------------------------------------------------------------
+
+THEME_HEADING = re.compile(r"^\s*THEME\s+(\d{1,2})(?:\s*\.\s*0)?\s*:?\s*(.*)$", re.IGNORECASE)
+TOC_LEADER = re.compile(r"\s*\.{3,}.*$")  # "THE FAMILY ........ 13"
+ACRONYMS = {"HIV", "AIDS", "ICT", "SMS"}
+MINOR_WORDS = {"and", "of", "the", "for", "in", "on", "to", "a", "an", "at", "with"}
+# "5.1 Listening and Speaking", also when spaced ("3 . 3 Writing") or when
+# Docling has glued other text in front ("Suggested environment , 2.1 ...").
+THEMED_STRAND = re.compile(r"(?<![\d.])(\d{1,2})\s*\.\s*(\d{1,2})(?![\d.])\s*(.*)")
+
+
+def _theme_title(name: str) -> str:
+    name = re.sub(r"\s*-\s*", " - ", name.strip(" :-"))
+    words = []
+    for i, word in enumerate(name.split()):
+        bare = word.strip(":,")
+        if bare.upper() in ACRONYMS:
+            words.append(word.upper())
+        elif i and bare.lower() in MINOR_WORDS:
+            words.append(word.lower())
+        else:
+            words.append("-".join(part.capitalize() for part in word.lower().split("-")))
+    return " ".join(words)
+
+
+def extract_themes(doc_dict: dict) -> dict[str, str]:
+    """Theme number -> "1.0 The Family", or {} for designs without themes.
+    Section headings miss a few themes (Docling files some inside tables), so
+    the table of contents and table cells are read as well; the first
+    readable name for each number wins."""
+    candidates = [t.get("text") or "" for t in doc_dict.get("texts", [])]
+    for table in doc_dict.get("tables", []):
+        for row in get_grid(table):
+            candidates.extend(cell_text(c) for c in row)
+    themes = {}
+    for text in candidates:
+        m = THEME_HEADING.match(text)
+        if not m or m.group(1) in themes:
+            continue
+        name = TOC_LEADER.sub("", m.group(2))
+        # "THEME 9: 9.1 Listening and Speaking" is a strand header, not a name;
+        # "THEME 6: HEALTH ... Suggested Vocabulary: ..." carries a trailing note.
+        name = re.split(r"\s+Suggested\b", name)[0].strip()
+        if not name or name[0].isdigit():
+            continue
+        themes[m.group(1)] = f"{m.group(1)}.0 {_theme_title(name)}"
+    return themes
+
+
+# The skill strands every theme repeats. Docling letter-spaces some of them
+# ("Readin g", "Gramma r in Use"), so near misses are snapped to these.
+LANGUAGE_STRANDS = ["Listening and Speaking", "Reading", "Grammar in Use", "Writing"]
+
+
+def uses_theme_numbering(rows: list[dict]) -> bool:
+    """True when strands are numbered inside their theme ("3.2 Reading" under
+    Theme 3). Arabic also lists themes, but numbers its strands on their own
+    ("2.0 Reading"), so a strand's number says nothing about its theme there."""
+    numbered = [m for m in (THEMED_STRAND.search(r["strand"]) for r in rows) if m]
+    return sum(1 for m in numbered if m.group(2) != "0") > len(rows) / 2
+
+
+def _language_strand_name(name: str) -> str:
+    # Sub-strand text glued on: "Listening and Speaking 1.1.1 and (3".
+    name = re.split(r"\s+\d{1,2}\s*\.\s*\d", name)[0]
+    name = re.sub(r"[\s•●]+$", "", name)
+    squashed = re.sub(r"\s+", "", name).lower()
+    for canonical in LANGUAGE_STRANDS:
+        target = re.sub(r"\s+", "", canonical).lower()
+        if squashed == target or difflib.SequenceMatcher(None, squashed, target).ratio() >= 0.85:
+            return canonical
+    return name
+
+
+def attach_themes(rows: list[dict], themes: dict[str, str]) -> None:
+    """Give each row its theme, and tidy its strand label to "3.3 Writing"."""
+    for row in rows:
+        m = THEMED_STRAND.search(row["strand"])
+        sub = re.match(r"\s*(\d{1,2})\s*\.\s*(\d{1,2})\s*\.\s*\d", row["sub_strand"])
+        if m:
+            number = m.group(1)
+            row["strand"] = f"{number}.{m.group(2)} {_language_strand_name(m.group(3))}".strip()
+        elif sub and not re.search(r"\d", row["strand"]):
+            # Unnumbered strand ("Listening and Speaking"): the sub-strand
+            # number ("13.1.1") says where it belongs.
+            number = sub.group(1)
+            row["strand"] = f"{number}.{sub.group(2)} {_language_strand_name(row['strand'])}"
+        else:
+            # A shifted row whose strand cell holds a sub-strand ("8.2.1 Fluency ...").
+            lead = re.match(r"\s*(\d{1,2})\s*\.", row["strand"])
+            number = lead.group(1) if lead else None
+        if number:
+            row["theme"] = themes.get(number, f"{number}.0")
 
 
 def parse_curriculum_tables(doc_dict: dict) -> list[dict]:
@@ -556,6 +660,7 @@ def build_chunks(grade: str, subject: str, source_file: str, curriculum_rows: li
         text_parts = [
             f"Grade: {grade}",
             f"Subject: {subject}",
+            *([f"Theme: {row['theme']}"] if row.get("theme") else []),
             f"Strand: {row['strand']}",
             f"Sub-strand: {row['sub_strand']}",
             f"Specific Learning Outcomes: {row['specific_learning_outcomes']}",
@@ -571,24 +676,25 @@ def build_chunks(grade: str, subject: str, source_file: str, curriculum_rows: li
         if row["rubric_text"]:
             text_parts.append(f"Assessment Rubric:\n{row['rubric_text']}")
 
-        chunks.append({
-            "id": chunk_id,
-            "text": "\n".join(text_parts),
-            "metadata": {
-                "grade": grade,
-                "subject": subject,
-                "strand": row["strand"],
-                "sub_strand": row["sub_strand"],
-                "num_lessons": row["num_lessons"],
-                "source_page": row["page_no"],
-                "source_file": source_file,
-                "has_rubric": bool(row["rubric_text"]),
-                "has_assessment_info": bool(row["assessment_methods"]),
-                # Known gap -- see module docstring. Left empty rather than guessed.
-                "pcis": "",
-                "core_competencies": "",
-            }
-        })
+        metadata = {
+            "grade": grade,
+            "subject": subject,
+            "strand": row["strand"],
+            "sub_strand": row["sub_strand"],
+            "num_lessons": row["num_lessons"],
+            "source_page": row["page_no"],
+            "source_file": source_file,
+            "has_rubric": bool(row["rubric_text"]),
+            "has_assessment_info": bool(row["assessment_methods"]),
+            # Known gap -- see module docstring. Left empty rather than guessed.
+            "pcis": "",
+            "core_competencies": "",
+        }
+        # Only the theme-based designs get the key, so every other chunk's
+        # metadata stays exactly as it was.
+        if row.get("theme"):
+            metadata["theme"] = row["theme"]
+        chunks.append({"id": chunk_id, "text": "\n".join(text_parts), "metadata": metadata})
     return chunks
 
 
@@ -635,11 +741,18 @@ def main():
             curriculum_rows = parse_document_lenient(doc_dict)
             parser = "lenient"
 
+        themes = extract_themes(doc_dict)
+        if themes and uses_theme_numbering(curriculum_rows):
+            attach_themes(curriculum_rows, themes)
+        else:
+            themes = {}
+
         chunks = build_chunks(grade, subject, jf.name, curriculum_rows)
         print(f"{jf.name}: {grade} / {subject} -> {len(chunks)} sub-strand chunk(s) "
               f"[{parser} parser], "
               f"{sum(1 for r in curriculum_rows if r['rubric_text'])} with a rubric, "
-              f"{sum(1 for r in curriculum_rows if r['assessment_methods'])} with assessment info")
+              f"{sum(1 for r in curriculum_rows if r['assessment_methods'])} with assessment info"
+              + (f", {len(themes)} theme(s)" if themes else ""))
 
         if not chunks:
             print(f"  !! No curriculum tables matched in {jf.name}. "
@@ -668,10 +781,16 @@ def main():
     # and metadata -- a re-run (or a resumed one) only embeds what changed.
     by_id = {c["id"]: c for c in all_chunks}
     stored = collection.get(ids=list(by_id), include=["documents", "metadatas"])
-    unchanged = {i for i, doc, meta in zip(stored["ids"], stored["documents"], stored["metadatas"])
-                 if by_id[i]["text"] == doc and by_id[i]["metadata"] == meta}
-    to_write = [c for c in all_chunks if c["id"] not in unchanged]
-    print(f"  {len(unchanged)} chunk(s) already stored unchanged, {len(to_write)} to embed")
+    same_text = {i: meta for i, doc, meta in zip(stored["ids"], stored["documents"], stored["metadatas"])
+                 if by_id[i]["text"] == doc}
+    unchanged = {i for i, meta in same_text.items() if by_id[i]["metadata"] == meta}
+    # Same text, new metadata: rewrite the metadata alone -- no embedding call.
+    meta_only = [i for i in same_text if i not in unchanged]
+    to_write = [c for c in all_chunks if c["id"] not in same_text]
+    print(f"  {len(unchanged)} chunk(s) already stored unchanged, {len(meta_only)} metadata-only "
+          f"update(s), {len(to_write)} to embed")
+    if meta_only:
+        collection.update(ids=meta_only, metadatas=[by_id[i]["metadata"] for i in meta_only])
 
     batch_size = 20
     for i in range(0, len(to_write), batch_size):

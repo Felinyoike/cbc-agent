@@ -27,6 +27,8 @@ export interface EvidenceItem {
   subject: string;
   strand: string;
   subStrand: string;
+  /** Only the theme-based language designs (English, Indigenous Languages) have one. */
+  theme?: string;
   page: number;
   designTitle: string;
   content: string;

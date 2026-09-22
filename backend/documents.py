@@ -130,8 +130,53 @@ def _add_section(doc, heading: str, text: str):
         doc.add_paragraph(line)
 
 
-def generate_lesson_docx(lesson_row: dict, scheme_row: dict | None) -> bytes:
-    """A `lesson_plans` row (+ its parent scheme, if linked) -> daily lesson plan document."""
+# Same wording as the reflection form (REFLECTION_QUESTIONS in frontend/src/lib/api.ts),
+# so the printed record reads as the questions the teacher answered.
+REFLECTION_QUESTIONS = [
+    ("learnerActions", "What did learners say or do?"),
+    ("workEvidence", "What learner work or assessment evidence is available?"),
+    ("needSupport", "Which learners or groups need additional support?"),
+    ("difficulties", "What difficulties were observed?"),
+    ("revisit", "What should be revisited next lesson?"),
+]
+OUTCOME_LABELS = {
+    "achieved": "Achieved",
+    "partially-achieved": "Partially achieved",
+    "not-yet-achieved": "Not yet achieved",
+    "insufficient-evidence": "Insufficient evidence",
+}
+
+
+def _add_reflection(doc, reflection_row: dict | None):
+    doc.add_heading("Reflection", level=2)
+    if not reflection_row:
+        # Not reflected on yet: leave space to write by hand after teaching.
+        for _ in range(4):
+            doc.add_paragraph("_" * 90)
+        return
+
+    content = reflection_row.get("content") or {}
+    evidence = content.get("evidence") or {}
+    status = OUTCOME_LABELS.get(content.get("outcomeStatus") or reflection_row.get("achievement_status"), "")
+    outcome = doc.add_paragraph()
+    outcome.add_run("Outcome status: ").bold = True
+    outcome.add_run(status or "Not recorded")
+    for key, question in REFLECTION_QUESTIONS:
+        answer = _text(evidence.get(key)).strip()
+        if not answer:
+            continue
+        doc.add_paragraph().add_run(question).bold = True
+        for line in answer.splitlines():
+            doc.add_paragraph(line)
+    summary = _text(reflection_row.get("agent_summary")).strip()
+    if summary:
+        doc.add_paragraph().add_run("Summary (AI-assisted, reviewed by the teacher)").bold = True
+        doc.add_paragraph(summary)
+
+
+def generate_lesson_docx(lesson_row: dict, scheme_row: dict | None, reflection_row: dict | None = None) -> bytes:
+    """A `lesson_plans` row (+ its parent scheme, if linked, and its confirmed
+    reflection, if any) -> daily lesson plan document."""
     lesson = lesson_row.get("content") or {}
     doc = _new_document(font_size=11, landscape=False)
     _add_title(doc, "Daily Lesson Plan", lesson_row.get("status") == "confirmed")
@@ -177,9 +222,6 @@ def generate_lesson_docx(lesson_row: dict, scheme_row: dict | None) -> bytes:
     _add_section(doc, "Lesson Closure", lesson.get("conclusion"))
     _add_section(doc, "Teacher Notes", lesson.get("teacherNotes"))
 
-    # LessonPlanDraft has no reflection field: it is written by hand after the lesson is taught.
-    doc.add_heading("Reflection", level=2)
-    for _ in range(4):
-        doc.add_paragraph("_" * 90)
+    _add_reflection(doc, reflection_row)
 
     return _to_bytes(doc)

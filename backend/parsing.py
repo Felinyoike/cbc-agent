@@ -23,6 +23,7 @@ LABELS = [
     "Assessment Rubric:",
     "Sub-strand:",
     "Subject:",
+    "Theme:",
     "Strand:",
     "Grade:",
 ]
@@ -129,6 +130,9 @@ def chunk_to_evidence_items(document: str, metadata: dict) -> list[dict]:
             "subject": subject,
             "strand": strand,
             "subStrand": sub_strand,
+            # Only the theme-based language designs (English, Indigenous
+            # Languages) have one; omitted rather than empty for the rest.
+            **({"theme": metadata["theme"]} if metadata.get("theme") else {}),
             "page": page,
             "designTitle": f"KICD {grade} {subject} Curriculum Design",
             # There is only one extracted representation in the real pipeline --

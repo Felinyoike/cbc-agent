@@ -28,6 +28,7 @@ import {
   generateReflectionSummary,
   getLesson,
   getReflectionByLesson,
+  REFLECTION_QUESTIONS,
   getScheme,
   updateReflection,
   type LessonRecord,
@@ -45,33 +46,18 @@ const emptyEvidence: ReflectionEvidence = {
   revisit: "",
 };
 
-const evidencePrompts: { key: keyof ReflectionEvidence; label: string; placeholder: string }[] = [
-  {
-    key: "learnerActions",
-    label: "What did learners say or do?",
-    placeholder: "e.g. Four of seven groups explained why terracing slows run-off, using their own words…",
-  },
-  {
-    key: "workEvidence",
-    label: "What learner work or assessment evidence is available?",
-    placeholder: "e.g. Group observation sheets, photographs of the terraced plot, exercise-book entries…",
-  },
-  {
-    key: "needSupport",
-    label: "Which learners or groups need additional support?",
-    placeholder: "e.g. Group 2 and Group 6 could not link slope to erosion rate…",
-  },
-  {
-    key: "difficulties",
-    label: "What difficulties were observed?",
-    placeholder: "e.g. Limited jembes meant two groups waited; the practical ran over time…",
-  },
-  {
-    key: "revisit",
-    label: "What should be revisited next lesson?",
-    placeholder: "e.g. Re-open the slope-and-erosion link using the chart before starting cover cropping…",
-  },
-];
+const placeholders: Record<keyof ReflectionEvidence, string> = {
+  learnerActions: "e.g. Four of seven groups explained why terracing slows run-off, using their own words…",
+  workEvidence: "e.g. Group observation sheets, photographs of the terraced plot, exercise-book entries…",
+  needSupport: "e.g. Group 2 and Group 6 could not link slope to erosion rate…",
+  difficulties: "e.g. Limited jembes meant two groups waited; the practical ran over time…",
+  revisit: "e.g. Re-open the slope-and-erosion link using the chart before starting cover cropping…",
+};
+
+const evidencePrompts = REFLECTION_QUESTIONS.map((question) => ({
+  ...question,
+  placeholder: placeholders[question.key],
+}));
 
 const outcomeOptions: { value: OutcomeStatus; description: string; tone: string }[] = [
   {

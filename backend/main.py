@@ -6,6 +6,7 @@ Run from the PROJECT ROOT (cbc-agent/), not from inside backend/:
 """
 import logging
 import math
+import re
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import date
@@ -50,6 +51,8 @@ class SearchRequest(BaseModel):
     sub_strand: Optional[str] = None
     content_type: Optional[str] = None
     query: Optional[str] = None
+    # Only meaningful for the theme-based designs (English, Indigenous Languages).
+    theme: Optional[str] = None
 
 
 @app.get("/health")
@@ -72,6 +75,11 @@ def curriculum_options():
     # the documented keys are still returned unchanged for compatibility.
     strands_by_grade_subject = defaultdict(set)
     sub_strands_by_grade_subject_strand = defaultdict(set)
+    # The language designs add a level above the strand (Theme -> Strand ->
+    # Sub-strand). Without it their 30-50 numbered strands ("1.1 Reading",
+    # "2.1 Reading", ...) arrive as one flat list.
+    themes_by_grade_subject = defaultdict(set)
+    strands_by_grade_subject_theme = defaultdict(set)
 
     for m in data["metadatas"]:
         grade, subject = m.get("grade"), m.get("subject")
@@ -88,9 +96,13 @@ def curriculum_options():
             strands_by_grade_subject[f"{grade}|{subject}"].add(strand)
             if sub_strand:
                 sub_strands_by_grade_subject_strand[f"{grade}|{subject}|{strand}"].add(sub_strand)
+            theme = m.get("theme")
+            if theme:
+                themes_by_grade_subject[f"{grade}|{subject}"].add(theme)
+                strands_by_grade_subject_theme[f"{grade}|{subject}|{theme}"].add(strand)
 
     def render(mapping):
-        return {k: sorted(v) for k, v in sorted(mapping.items())}
+        return {k: sorted(v, key=_numbered_key) for k, v in sorted(mapping.items())}
 
     return {
         "grades": sorted(grades),
@@ -99,13 +111,23 @@ def curriculum_options():
         "subStrandsByStrand": render(sub_strands_by_strand),
         "strandsByGradeSubject": render(strands_by_grade_subject),
         "subStrandsByGradeSubjectStrand": render(sub_strands_by_grade_subject_strand),
+        "themesByGradeSubject": render(themes_by_grade_subject),
+        "strandsByGradeSubjectTheme": render(strands_by_grade_subject_theme),
     }
+
+
+def _numbered_key(label: str):
+    """Sort "10.0 Money" after "9.0 HIV and AIDS", not before "2.0 ..." --
+    a plain string sort puts every two-digit number out of order."""
+    m = re.match(r"\s*(\d+(?:\.\d+)*)", label)
+    return ([int(n) for n in m.group(1).split(".")] if m else [float("inf")], label)
 
 
 @app.post("/api/curriculum/search")
 def search_curriculum(req: SearchRequest):
     try:
-        return search_evidence(req.grade, req.subject, req.strand, req.sub_strand, req.content_type, req.query)
+        return search_evidence(req.grade, req.subject, req.strand, req.sub_strand, req.content_type, req.query,
+                               req.theme)
     except SearchFailed as exc:
         # A failed embedding call (network, bad key, quota) is not "no matches" --
         # reporting it as an empty result would hide the outage from the teacher.
@@ -253,13 +275,16 @@ def update_lesson(lesson_id: UUID, body: LessonUpdate):
 
 @app.get("/api/lessons/{lesson_id}")
 def get_lesson(lesson_id: UUID):
+    """The lesson plan plus its reflection (null until one is started), so the
+    lesson shows its post-lesson record without a second request."""
     _require_db()
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM lesson_plans WHERE id = %s", (str(lesson_id),))
         row = cur.fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Lesson plan not found")
-    return row
+        if row is None:
+            raise HTTPException(status_code=404, detail="Lesson plan not found")
+        reflection = _latest_reflection(cur, lesson_id)
+    return {**row, "reflection": _reflection_out(reflection) if reflection else None}
 
 
 @app.post("/api/lessons/{lesson_id}/confirm")
@@ -319,7 +344,12 @@ def download_lesson(lesson_id: UUID):
     # Same date the document header shows: the draft's own date, falling back to the column.
     lesson_date = (lesson["content"] or {}).get("date") or lesson["lesson_date"]
     filename = safe_filename("Lesson_Plan", lesson["sub_strand"], lesson_date)
-    return _docx_response(generate_lesson_docx(lesson, scheme), filename)
+    # Only a confirmed reflection is printed; a draft one is still the teacher's working notes.
+    with db.get_cursor() as cur:
+        reflection = _latest_reflection(cur, lesson_id)
+    if reflection and reflection["status"] != "confirmed":
+        reflection = None
+    return _docx_response(generate_lesson_docx(lesson, scheme, reflection), filename)
 
 
 @app.get("/api/library")
@@ -334,7 +364,9 @@ def library():
         schemes = cur.fetchall()
         cur.execute(
             """SELECT l.id, l.sub_strand, l.updated_at, l.content,
-                      s.grade, s.subject, s.term, s.year
+                      s.grade, s.subject, s.term, s.year,
+                      (SELECT r.status FROM evaluation_records r WHERE r.lesson_id = l.id
+                       ORDER BY r.created_at DESC LIMIT 1) AS reflection_status
                FROM lesson_plans l LEFT JOIN schemes_of_work s ON s.id = l.scheme_id
                WHERE l.status = 'confirmed'"""
         )
@@ -353,6 +385,7 @@ def library():
             "year": scheme["year"],
             "updatedAt": scheme["updated_at"],
             "evidenceCount": len({eid for row in rows for eid in row.get("evidenceIds") or []}),
+            "reflectionStatus": None,
         })
     for lesson in lessons:
         items.append({
@@ -367,6 +400,7 @@ def library():
             "updatedAt": lesson["updated_at"],
             # LessonPlanDraft carries no evidence ids, so no count is reported.
             "evidenceCount": None,
+            "reflectionStatus": lesson["reflection_status"] or "not_started",
         })
 
     items.sort(key=lambda item: item["updatedAt"], reverse=True)
@@ -413,6 +447,14 @@ def _lesson_title(lesson_content: Optional[dict], sub_strand: str) -> str:
 def _lesson_date(lesson_content: Optional[dict], lesson_date) -> str:
     # The draft's own date is what the teacher sees; the column is the fallback.
     return (lesson_content or {}).get("date") or (lesson_date.isoformat() if lesson_date else "")
+
+
+def _latest_reflection(cur, lesson_id) -> Optional[dict]:
+    cur.execute(
+        "SELECT * FROM evaluation_records WHERE lesson_id = %s ORDER BY created_at DESC LIMIT 1",
+        (str(lesson_id),),
+    )
+    return cur.fetchone()
 
 
 def _reflection_out(row: dict) -> dict:
@@ -478,11 +520,7 @@ def get_reflection_for_lesson(lesson_id: UUID):
     """`{"reflection": null}` when none exists yet: "not started" is a normal state, not an error."""
     _require_db()
     with db.get_cursor() as cur:
-        cur.execute(
-            "SELECT * FROM evaluation_records WHERE lesson_id = %s ORDER BY created_at DESC LIMIT 1",
-            (str(lesson_id),),
-        )
-        row = cur.fetchone()
+        row = _latest_reflection(cur, lesson_id)
     return {"reflection": _reflection_out(row) if row else None}
 
 
@@ -556,6 +594,10 @@ def confirm_reflection(reflection_id: UUID):
             (outcome_status, str(reflection_id)),
         )
         confirmed = cur.fetchone()
+        # The confirmed reflection becomes part of its lesson plan (shown on the
+        # lesson and printed in its Word download), so the lesson counts as updated.
+        cur.execute("UPDATE lesson_plans SET updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                    (str(row["lesson_id"]),))
         cur.execute(
             """INSERT INTO confirmation_logs (entity_type, entity_id, user_id, action)
                VALUES ('evaluation', %s, %s, 'confirmed')""",

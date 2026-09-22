@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   Activity,
   ArrowRight,
+  BookMarked,
   Boxes,
   Check,
   ChevronRight,
@@ -70,6 +71,7 @@ function classifyFailure(error: unknown): SearchFailure {
   if (!(error instanceof CurriculumApiError)) return "unreachable";
   return error.status === 502 ? "semantic" : "server";
 }
+const ALL_THEMES = "All themes";
 const ALL_STRANDS = "All strands";
 const ALL_SUB_STRANDS = "All sub-strands";
 
@@ -86,6 +88,26 @@ function subStrandsFor(
   strand: string
 ): string[] {
   return options?.subStrandsByGradeSubjectStrand[`${grade}|${subject}|${strand}`] ?? [];
+}
+
+// English and Indigenous Languages add a Theme level above the strand. For them
+// the strand list is scoped to the chosen theme ("1.1 Listening and Speaking" ...
+// "1.4 Writing") instead of every theme's strands at once. Empty for other subjects.
+function themesFor(options: CurriculumOptions | null, grade: string, subject: string): string[] {
+  return options?.themesByGradeSubject[`${grade}|${subject}`] ?? [];
+}
+
+function strandsIn(options: CurriculumOptions | null, grade: string, subject: string, theme: string): string[] {
+  return themesFor(options, grade, subject).length && theme !== ALL_THEMES
+    ? options?.strandsByGradeSubjectTheme[`${grade}|${subject}|${theme}`] ?? []
+    : strandsFor(options, grade, subject);
+}
+
+/** The selection to land on after the grade, subject or theme changes. */
+function firstSelection(options: CurriculumOptions | null, grade: string, subject: string, theme?: string) {
+  const nextTheme = theme ?? themesFor(options, grade, subject)[0] ?? "";
+  const strand = strandsIn(options, grade, subject, nextTheme)[0] ?? "";
+  return { theme: nextTheme, strand, subStrand: subStrandsFor(options, grade, subject, strand)[0] ?? "" };
 }
 
 export default function CurriculumPage() {
@@ -111,6 +133,7 @@ function CurriculumExplorer() {
   const [grade, setGrade] = useState(context.grade);
   const [subject, setSubject] = useState(context.subject);
   const [term, setTerm] = useState(context.term);
+  const [theme, setTheme] = useState("");
   const [strand, setStrand] = useState("");
   const [subStrand, setSubStrand] = useState("");
   const [contentType, setContentType] = useState<string>(ALL_TYPES);
@@ -122,7 +145,15 @@ function CurriculumExplorer() {
   const [loading, setLoading] = useState(true);
   const [searchFailure, setSearchFailure] = useState<SearchFailure | null>(null);
 
-  const strandOptions = [ALL_STRANDS, ...strandsFor(options, grade, subject)];
+  const applySelection = (selection: { theme: string; strand: string; subStrand: string }) => {
+    setTheme(selection.theme);
+    setStrand(selection.strand);
+    setSubStrand(selection.subStrand);
+  };
+
+  const themeOptions = themesFor(options, grade, subject);
+  const hasThemes = themeOptions.length > 0;
+  const strandOptions = [ALL_STRANDS, ...strandsIn(options, grade, subject, theme)];
   const subStrandOptions =
     strand === ALL_STRANDS ? [] : [ALL_SUB_STRANDS, ...subStrandsFor(options, grade, subject, strand)];
 
@@ -137,11 +168,9 @@ function CurriculumExplorer() {
         const nextSubject = fetched.subjects.includes(context.subject)
           ? context.subject
           : fetched.subjects[0] ?? "";
-        const firstStrand = strandsFor(fetched, nextGrade, nextSubject)[0] ?? "";
         setGrade(nextGrade);
         setSubject(nextSubject);
-        setStrand(firstStrand);
-        setSubStrand(subStrandsFor(fetched, nextGrade, nextSubject, firstStrand)[0] ?? "");
+        applySelection(firstSelection(fetched, nextGrade, nextSubject));
       })
       .catch((error) => {
         if (error?.name !== "AbortError") {
@@ -163,6 +192,7 @@ function CurriculumExplorer() {
         const response = await searchCurriculum({
           grade,
           subject,
+          theme: hasThemes && theme !== ALL_THEMES ? theme : undefined,
           strand: strand === ALL_STRANDS ? undefined : strand,
           subStrand: strand === ALL_STRANDS || subStrand === ALL_SUB_STRANDS ? undefined : subStrand,
           contentType: contentType === ALL_TYPES ? undefined : contentType,
@@ -182,14 +212,12 @@ function CurriculumExplorer() {
     void run();
 
     return () => controller.abort();
-  }, [options, grade, subject, strand, subStrand, contentType, submittedQuery]);
+  }, [options, grade, subject, hasThemes, theme, strand, subStrand, contentType, submittedQuery]);
 
   const handleGradeChange = useCallback(
     (next: string) => {
       setGrade(next);
-      const firstStrand = strandsFor(options, next, subject)[0] ?? "";
-      setStrand(firstStrand);
-      setSubStrand(subStrandsFor(options, next, subject, firstStrand)[0] ?? "");
+      applySelection(firstSelection(options, next, subject));
     },
     [options, subject]
   );
@@ -197,11 +225,20 @@ function CurriculumExplorer() {
   const handleSubjectChange = useCallback(
     (next: string) => {
       setSubject(next);
-      const firstStrand = strandsFor(options, grade, next)[0] ?? "";
-      setStrand(firstStrand);
-      setSubStrand(subStrandsFor(options, grade, next, firstStrand)[0] ?? "");
+      applySelection(firstSelection(options, grade, next));
     },
     [options, grade]
+  );
+
+  const handleThemeChange = useCallback(
+    (next: string) => {
+      if (next === ALL_THEMES) {
+        applySelection({ theme: next, strand: ALL_STRANDS, subStrand: ALL_SUB_STRANDS });
+      } else {
+        applySelection(firstSelection(options, grade, subject, next));
+      }
+    },
+    [options, grade, subject]
   );
 
   const handleStrandChange = useCallback(
@@ -229,6 +266,9 @@ function CurriculumExplorer() {
             <FilterChip icon={<GraduationCap className="size-3.5 text-muted-foreground" />} value={grade} onChange={handleGradeChange} options={options?.grades ?? []} label="Grade" />
             <FilterChip icon={<Layers className="size-3.5 text-muted-foreground" />} value={subject} onChange={handleSubjectChange} options={options?.subjects ?? []} label="Subject" />
             <FilterChip icon={<Tag className="size-3.5 text-muted-foreground" />} value={term} onChange={setTerm} options={terms} label="Term" />
+            {hasThemes && (
+              <FilterChip icon={<BookMarked className="size-3.5 text-muted-foreground" />} value={theme} onChange={handleThemeChange} options={[ALL_THEMES, ...themeOptions]} label="Theme" />
+            )}
             <FilterChip icon={<Layers className="size-3.5 text-muted-foreground" />} value={strand} onChange={handleStrandChange} options={strandOptions} label="Strand" />
             <FilterChip icon={<GitBranch className="size-3.5 text-muted-foreground" />} value={subStrand} onChange={setSubStrand} options={subStrandOptions} label="Sub-strand" />
             <FilterChip
@@ -269,6 +309,12 @@ function CurriculumExplorer() {
             <span className="text-muted-foreground">
               {grade} · {subject} ·
             </span>
+            {hasThemes && theme !== ALL_THEMES && (
+              <>
+                <span className="font-medium">{theme}</span>
+                <ChevronRight className="size-3.5 text-muted-foreground" />
+              </>
+            )}
             <span className="font-medium">{strand}</span>
             <ChevronRight className="size-3.5 text-muted-foreground" />
             <span className="font-medium">{subStrand}</span>
@@ -315,6 +361,7 @@ function CurriculumExplorer() {
                       <SourceTag page={item.page} />
                     </div>
                     <span className="text-xs text-muted-foreground">
+                      {item.theme ? `${item.theme} › ` : ""}
                       {item.strand} › {item.subStrand}
                     </span>
                   </CardHeader>

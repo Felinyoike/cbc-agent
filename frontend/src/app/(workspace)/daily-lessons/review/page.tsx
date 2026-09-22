@@ -18,6 +18,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ConfirmationDialog, DiscardDialog } from "@/components/ConfirmationDialog";
+import { LessonReflection } from "@/components/LessonReflection";
 import { SourceDrawer } from "@/components/SourceDrawer";
 import { AiBadge, DraftBadge, OfficialEvidenceBadge, SourceTag, TeacherInputBadge } from "@/components/Provenance";
 import { useTeachingContext } from "@/context/TeachingContext";
@@ -282,6 +283,9 @@ export default function LessonReviewPage() {
           </CardContent>
         </Card>
 
+        {/* Only a confirmed lesson can be reflected on; its reflection then belongs to this plan. */}
+        {lessonPlanConfirmed && currentLessonId && <LessonReflection lessonId={currentLessonId} />}
+
         {confirmError && (
           <div role="alert" className="flex items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-3">
             <AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" />
@@ -297,11 +301,7 @@ export default function LessonReviewPage() {
               <Link href="/library" className="font-medium underline underline-offset-2">
                 My Library
               </Link>
-              . Record post-lesson evidence in{" "}
-              <Link href="/reflections" className="font-medium underline underline-offset-2">
-                Reflections
-              </Link>{" "}
-              after you teach it.
+              . After you teach it, add a reflection below; once confirmed it becomes part of this lesson plan.
             </p>
           </div>
         )}

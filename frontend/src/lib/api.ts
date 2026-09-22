@@ -33,6 +33,11 @@ export interface CurriculumOptions {
   strandsByGradeSubject: Record<string, string[]>;
   /** Keyed `"<grade>|<subject>|<strand>"`. */
   subStrandsByGradeSubjectStrand: Record<string, string[]>;
+  /** Keyed `"<grade>|<subject>"`; present only for the theme-based language designs
+   *  (English, Indigenous Languages), which go Theme -> Strand -> Sub-strand. */
+  themesByGradeSubject: Record<string, string[]>;
+  /** Keyed `"<grade>|<subject>|<theme>"`. */
+  strandsByGradeSubjectTheme: Record<string, string[]>;
 }
 
 export interface SearchResponse {
@@ -48,6 +53,7 @@ export interface SearchParams {
   subject: string;
   strand?: string;
   subStrand?: string;
+  theme?: string;
   contentType?: string;
   query?: string;
   signal?: AbortSignal;
@@ -58,6 +64,7 @@ export async function searchCurriculum({
   subject,
   strand,
   subStrand,
+  theme,
   contentType,
   query,
   signal,
@@ -72,6 +79,7 @@ export async function searchCurriculum({
       subject,
       strand: strand || undefined,
       sub_strand: subStrand || undefined,
+      theme: theme || undefined,
       content_type: contentType || undefined,
       query: query || undefined,
     }),
@@ -157,6 +165,8 @@ export interface LibraryEntry {
   updatedAt: string;
   /** Distinct evidence cited by a scheme's rows; null for lesson plans, which carry no evidence ids. */
   evidenceCount: number | null;
+  /** Lesson plans only (null for schemes): how far the post-lesson reflection has got. */
+  reflectionStatus: ReflectionStatus | null;
 }
 
 export function getLibrary(signal?: AbortSignal) {
@@ -254,6 +264,8 @@ export interface LessonRecord {
   content: LessonPlanDraft;
   status: "draft" | "confirmed";
   created_at: string;
+  /** Returned by GET /api/lessons/{id} only: the lesson's reflection, null until one is started. */
+  reflection?: ReflectionRecordData | null;
 }
 
 export interface LessonCreateInput {
@@ -296,6 +308,16 @@ export interface ReflectionEvidence {
   difficulties: string;
   revisit: string;
 }
+
+/** The questions a reflection answers, in order. The lesson plan's Word download
+ *  prints the same wording (REFLECTION_QUESTIONS in backend/documents.py). */
+export const REFLECTION_QUESTIONS: { key: keyof ReflectionEvidence; label: string }[] = [
+  { key: "learnerActions", label: "What did learners say or do?" },
+  { key: "workEvidence", label: "What learner work or assessment evidence is available?" },
+  { key: "needSupport", label: "Which learners or groups need additional support?" },
+  { key: "difficulties", label: "What difficulties were observed?" },
+  { key: "revisit", label: "What should be revisited next lesson?" },
+];
 
 /** "not_started" means the confirmed lesson has no reflection record at all yet. */
 export type ReflectionStatus = "not_started" | "draft" | "confirmed";

@@ -11,8 +11,11 @@ class SearchFailed(RuntimeError):
     """A semantic query could not be embedded or run (network, bad key, quota)."""
 
 
-def _build_where(grade: str, subject: str, strand: Optional[str], sub_strand: Optional[str]) -> dict:
+def _build_where(grade: str, subject: str, strand: Optional[str], sub_strand: Optional[str],
+                 theme: Optional[str] = None) -> dict:
     clauses = [{"grade": grade}, {"subject": subject}]
+    if theme:
+        clauses.append({"theme": theme})
     if strand:
         clauses.append({"strand": strand})
     if sub_strand:
@@ -21,7 +24,8 @@ def _build_where(grade: str, subject: str, strand: Optional[str], sub_strand: Op
 
 
 def search_evidence(grade: str, subject: str, strand: Optional[str] = None, sub_strand: Optional[str] = None,
-                    content_type: Optional[str] = None, query: Optional[str] = None) -> dict:
+                    content_type: Optional[str] = None, query: Optional[str] = None,
+                    theme: Optional[str] = None) -> dict:
     """Returns {"results": [EvidenceItem...], "total": n} plus "semanticUnavailable" when degraded.
 
     Raises SearchFailed when a semantic query fails, so an outage never reads as "no matches".
@@ -32,7 +36,7 @@ def search_evidence(grade: str, subject: str, strand: Optional[str] = None, sub_
     if content_type in UNSUPPORTED_CATEGORIES:
         return {"results": [], "total": 0}
 
-    where = _build_where(grade, subject, strand, sub_strand)
+    where = _build_where(grade, subject, strand, sub_strand, theme)
     # A query we cannot embed degrades to filter-only browsing rather than failing,
     # but the caller is told so it never mistakes filtered results for ranked ones.
     degraded = bool(query) and not SEMANTIC_AVAILABLE

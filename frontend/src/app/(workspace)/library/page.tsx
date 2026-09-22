@@ -21,6 +21,7 @@ import {
   lessonDownloadUrl,
   schemeDownloadUrl,
   type LibraryEntry,
+  type ReflectionStatus,
 } from "@/lib/api";
 
 const typeIcons = {
@@ -168,6 +169,13 @@ export default function LibraryPage() {
   );
 }
 
+// A confirmed reflection is included in the lesson plan's download.
+const reflectionStatusLabels: Record<ReflectionStatus, string> = {
+  not_started: "Not yet added",
+  draft: "In progress",
+  confirmed: "Included",
+};
+
 function LibraryCard({ item }: { item: LibraryEntry }) {
   const Icon = typeIcons[item.type];
   const context = [item.grade, item.subject].filter(Boolean).join(" · ");
@@ -194,6 +202,9 @@ function LibraryCard({ item }: { item: LibraryEntry }) {
           <Meta label="Context" value={context || "Not linked to a saved scheme"} />
           <Meta label="Term" value={term || "—"} />
           <Meta label="Last updated" value={formatDate(item.updatedAt)} />
+          {item.reflectionStatus && (
+            <Meta label="Reflection" value={reflectionStatusLabels[item.reflectionStatus]} />
+          )}
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
