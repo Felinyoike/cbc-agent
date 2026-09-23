@@ -155,14 +155,33 @@ file's outdated chunks are removed only after its new ones are written, and
 Gemini rate limits are waited out. `python ingest.py --dry-run` shows what each
 file parses to without embedding anything. Subject names are normalised in
 `ingest.py` (`CANONICAL_SUBJECTS`), so add a new subject there when you add its
-design. Designs whose tables the standard parser cannot read (currently the
-three CRE designs) go through a more tolerant parser automatically.
+design. Each design is read by two parsers: a strict one for clean five-column
+tables and a tolerant one that also follows continuation pages, merged columns
+and header variants. Whichever recovers more sub-strands is used, except for the
+theme-based language designs, whose skill strands only the strict parser names.
+Kiswahili designs are read in Kiswahili (Mada / Mada Ndogo, "Gredi ya 4",
+"Vipindi 2").
 
-Ingested today: Agriculture, Creative Arts, English and Christian Religious
-Education for Grades 4–6, Indigenous Languages for Grades 5–6, and Arabic for
-Grade 4.
+Ingested today (28 designs, 659 sub-strands):
 
-English and Indigenous Languages have a level above the strand: Theme →
+| Subject | Grade 4 | Grade 5 | Grade 6 |
+|---|---|---|---|
+| Agriculture, Creative Arts, English, Christian Religious Education, Science and Technology, Social Studies | ✓ | ✓ | ✓ |
+| Indigenous Languages | ✓ | ✓ | ✓ |
+| Kiswahili | ✓ | — | ✓ |
+| Mathematics | — | ✓ | ✓ |
+| Islamic Religious Education | ✓ | ✓ | — |
+| Arabic | ✓ | — | — |
+
+No design file exists yet for the dashes. Add the Docling JSON to
+`docling_json/` and re-run `python ingest.py`.
+
+**Restart the API after ingesting.** A running backend keeps the vector index it
+loaded at startup, so after another process changes the store, filter browsing
+still works but semantic search fails with "Semantic search failed: … Error
+finding id" until the API is restarted.
+
+English, Indigenous Languages and Kiswahili have a level above the strand: Theme →
 Strand → Sub-strand (e.g. "1.0 The Family" → "1.1 Listening and Speaking" →
 "1.1.1 Pronunciation and Vocabulary"). Their chunks carry a `theme` field and a
 `Theme:` line, and the Curriculum Explorer shows a Theme filter for them only.
@@ -324,10 +343,19 @@ python agent.py
   carry stray words at the end of a key inquiry question, one Grade 5 outcome
   (3.2) has scrambled word order, and two learning-experience lists (Grade 5
   3.2 and 5.2) are cut short.
-- Some language sub-strands are not ingested: Indigenous Languages Grade 5
-  7.1 and Grade 6 1.1, 4.1, 6.1 and 9.1 (their tables have "THEME N:" merged into
-  the header row), and English Grade 6 yields 29 sub-strands from 43 curriculum
-  tables, one of them shifted a column (strand "8.2.1 Fluency ...").
+- Some language sub-strands are not ingested: Indigenous Languages Grade 4
+  2.1, 4.1, 5.1 and 9.1, Grade 5 7.1 and Grade 6 1.1, 4.1, 6.1 and 9.1 (their
+  tables have "THEME N:" merged into the header row), and English Grade 6 yields
+  29 sub-strands from 43 curriculum tables, one of them shifted a column (strand
+  "8.2.1 Fluency ...").
+- Gaps in the designs themselves: Social Studies Grade 4 "4.4 African Diaspora"
+  appears only in the assessment table, with no curriculum row to ingest; Grade 5
+  Science and Technology's "Vertebrates" row has no number (the summary table
+  calls it "1.2 Invertebrates"), so it is stored unnumbered; Kiswahili Grade 6
+  7.4.1's outcomes start at "b)" because part (a) is lost where the row breaks
+  across pages. Kiswahili rubrics (strand-level "MADA: …" tables) are not attached.
+- Generation does not yet set the output language, so term plans and lessons for
+  Kiswahili and Arabic are likely to come out in English.
 - `docker-compose.yml` is empty; Postgres is started with the `docker run`
   command above.
 

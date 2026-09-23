@@ -75,7 +75,12 @@ CHROMA_DB_PATH = "./kicd_chroma_db"
 COLLECTION_NAME = "kicd_curriculum"
 
 GRADE_SUBJECT_PATTERN = re.compile(r"^([A-Z][A-Za-z\s\-]+?)\s+GRADE\s+(\d+)\s*$")
-LESSON_COUNT_PATTERN = re.compile(r"\((\d+)\s*lessons?\)", re.IGNORECASE)
+LESSON_COUNT_PATTERN = re.compile(r"\((\d+)\s*lessons?\)|\(\s*(?:vipindi|kipindi)\s*(\d+)\s*\)", re.IGNORECASE)
+# Side-note rows Docling spreads across every column of a curriculum table
+# (Kiswahili: "Umilisi wa kimsingi unaokuzwa" = core competencies to be developed).
+SIDE_NOTE_PREFIXES = ("umilisi", "maadili", "masuala mtambuko", "uhusiano wa", "core competenc")
+# The Kiswahili designs print "GREDI YA 4" where the others print "GRADE 4".
+GRADE_IN_HEADER = re.compile(r"\b(?:GRADE|GREDI\s+YA)\s+(\d{1,2})\b", re.IGNORECASE)
 
 
 def cell_text(cell: dict) -> str:
@@ -95,6 +100,8 @@ def classify_table(headers: list[str]) -> str:
     h = [x.lower() for x in headers]
     joined = " | ".join(h)
     if "strand" in joined and "sub strand" in joined and "specific learning outcomes" in joined:
+        return "curriculum"
+    if "mada" in joined and "mada ndogo" in joined and "matokeo" in joined:  # Kiswahili
         return "curriculum"
     if "level indicator" in joined and "exceeds expectations" in joined:
         return "rubric"
@@ -118,11 +125,16 @@ def extract_grade_subject(doc_dict: dict, filename: str) -> tuple[str, str]:
             grade = f"Grade {m.group(2)}"
             return grade, subject
 
-    # Fallback: guess from filename
+    # Fallback: guess from filename, taking the grade from the title page if it names one.
     stem = Path(filename).stem
     grade_m = re.search(r"grade[\s\-_]*(\d+)", stem, re.IGNORECASE)
+    for item in doc_dict.get("texts", [])[:15]:
+        header_m = GRADE_IN_HEADER.search(item.get("text", "")) if item.get("label") == "section_header" else None
+        if header_m:
+            grade_m = header_m
+            break
     grade = f"Grade {grade_m.group(1)}" if grade_m else "Unknown"
-    subject_guess = re.sub(r"grade[\s\-_]*\d+", "", stem, flags=re.IGNORECASE)
+    subject_guess = re.sub(r"(?:grade|gredi[\s\-_]*ya)[\s\-_]*\d+", "", stem, flags=re.IGNORECASE)
     subject_guess = re.sub(r"[\-_]+", " ", subject_guess).strip().title() or "Unknown"
     print(f"  (!) Could not find 'SUBJECT GRADE N' header text -- "
           f"guessed '{grade}' / '{subject_guess}' from filename. Verify this.")
@@ -141,6 +153,12 @@ CANONICAL_SUBJECTS = [
     ("english", "English"),
     ("indigenous", "Indigenous Languages"),
     ("arabic", "Arabic"),
+    ("islamic religious", "Islamic Religious Education"),
+    ("ire", "Islamic Religious Education"),
+    ("mathematics", "Mathematics"),
+    ("science", "Science and Technology"),
+    ("social studies", "Social Studies"),
+    ("kiswahili", "Kiswahili"),
 ]
 
 
@@ -155,7 +173,7 @@ def canonical_subject(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Themes (English and Indigenous Languages)
+# Themes (English, Indigenous Languages and Kiswahili)
 #
 # The language designs have one more level than the others: Theme -> Strand ->
 # Sub-strand, e.g. "THEME 1.0 THE FAMILY" -> "1.1 Listening and Speaking" ->
@@ -165,9 +183,13 @@ def canonical_subject(raw: str) -> str:
 # ---------------------------------------------------------------------------
 
 THEME_HEADING = re.compile(r"^\s*THEME\s+(\d{1,2})(?:\s*\.\s*0)?\s*:?\s*(.*)$", re.IGNORECASE)
+# Kiswahili prints its themes as bare numbered headings: "1.0 NYUMBANI".
+NUMBERED_THEME_HEADING = re.compile(r"^\s*(\d{1,2})\s*\.\s*0\s+([A-Z][A-Z\s\-,']+)$")
 TOC_LEADER = re.compile(r"\s*\.{3,}.*$")  # "THE FAMILY ........ 13"
 ACRONYMS = {"HIV", "AIDS", "ICT", "SMS"}
-MINOR_WORDS = {"and", "of", "the", "for", "in", "on", "to", "a", "an", "at", "with"}
+MINOR_WORDS = {"and", "of", "the", "for", "in", "on", "to", "a", "an", "at", "with",
+               # Kiswahili: "Matunda na Mimea", "Viungo vya Mwili vya Ndani"
+               "na", "ya", "wa", "za", "la", "cha", "vya", "kwa"}
 # "5.1 Listening and Speaking", also when spaced ("3 . 3 Writing") or when
 # Docling has glued other text in front ("Suggested environment , 2.1 ...").
 THEMED_STRAND = re.compile(r"(?<![\d.])(\d{1,2})\s*\.\s*(\d{1,2})(?![\d.])\s*(.*)")
@@ -208,12 +230,21 @@ def extract_themes(doc_dict: dict) -> dict[str, str]:
         if not name or name[0].isdigit():
             continue
         themes[m.group(1)] = f"{m.group(1)}.0 {_theme_title(name)}"
+    # Only numbers no "THEME N" text named: an all-capitals "N.0 NAME" section heading.
+    for item in doc_dict.get("texts", []):
+        if item.get("label") != "section_header":
+            continue
+        m = NUMBERED_THEME_HEADING.match(item.get("text") or "")
+        if m and m.group(1) not in themes:
+            themes[m.group(1)] = f"{m.group(1)}.0 {_theme_title(m.group(2))}"
     return themes
 
 
 # The skill strands every theme repeats. Docling letter-spaces some of them
 # ("Readin g", "Gramma r in Use"), so near misses are snapped to these.
-LANGUAGE_STRANDS = ["Listening and Speaking", "Reading", "Grammar in Use", "Writing"]
+LANGUAGE_STRANDS = ["Listening and Speaking", "Reading", "Grammar in Use", "Writing",
+                    # Kiswahili
+                    "Kusikiliza na Kuzungumza", "Kusoma", "Kuandika", "Sarufi"]
 
 
 def uses_theme_numbering(rows: list[dict]) -> bool:
@@ -232,6 +263,11 @@ def _language_strand_name(name: str) -> str:
     for canonical in LANGUAGE_STRANDS:
         target = re.sub(r"\s+", "", canonical).lower()
         if squashed == target or difflib.SequenceMatcher(None, squashed, target).ratio() >= 0.85:
+            return canonical
+    # A misspelt copy printed in front of the real name: "Safuri Sarufi".
+    for canonical in LANGUAGE_STRANDS:
+        target = re.sub(r"\s+", "", canonical).lower()
+        if len(target) >= 6 and squashed.endswith(target) and len(squashed) <= 2 * len(target):
             return canonical
     return name
 
@@ -278,11 +314,14 @@ def parse_curriculum_tables(doc_dict: dict) -> list[dict]:
             sub_strand = cell_text(data_row[1])
             if not strand or not sub_strand:
                 continue
+            if strand.lower().startswith(SIDE_NOTE_PREFIXES) and sub_strand.lower().startswith(SIDE_NOTE_PREFIXES):
+                continue
             lesson_m = LESSON_COUNT_PATTERN.search(sub_strand)
+            lessons = next((g for g in lesson_m.groups() if g), "") if lesson_m else ""
             rows.append({
                 "strand": strand,
                 "sub_strand": sub_strand,
-                "num_lessons": lesson_m.group(1) if lesson_m else "",
+                "num_lessons": lessons,
                 "specific_learning_outcomes": cell_text(data_row[2]),
                 "suggested_learning_experiences": cell_text(data_row[3]),
                 "key_inquiry_question": cell_text(data_row[4]),
@@ -474,7 +513,7 @@ def _split_row(cells: list[str], roles: list[set]) -> dict:
 def _sub_strand_title(lead_cells: list[str]):
     """['3.0 The Life of Jesus Christ 3.1 The Annunciation 3 lessons'] ->
     ('3.1', '3', 'The Annunciation', leftover text after the title)."""
-    for lead in lead_cells:
+    for index, lead in enumerate(lead_cells):
         m = SUB_STRAND_NUMBER.search(lead)
         if m:
             break
@@ -482,6 +521,12 @@ def _sub_strand_title(lead_cells: list[str]):
         return None
     number = f"{m.group(1)}.{m.group(2)}"
     prefix, rest = lead[:m.start()], lead[m.end():]
+    # The number can end the strand cell with the title in the next one:
+    # "1.0 Living Things and their Environment 1.1" | "Plants (12 lessons)" --
+    # sometimes with a stray side-note after the number ("1.3 Core Competencies ...").
+    before_count = LOOSE_LESSON_COUNT.split(rest, maxsplit=1)[0].strip().lower()
+    if (not before_count or before_count.startswith("core competenc")) and index + 1 < len(lead_cells):
+        rest = lead_cells[index + 1]
     count = LOOSE_LESSON_COUNT.search(rest)
     if count:
         name, leftover, lessons = rest[:count.start()], rest[count.end():], count.group(1)
@@ -494,6 +539,21 @@ def _sub_strand_title(lead_cells: list[str]):
     # A sub-strand title that repeats itself, e.g. "4.2 Truthfulness 3 lessons 4.2 Truthfulness".
     name = _clean(name.split(number)[0]).rstrip(" :")
     return number, lessons, name, leftover
+
+
+def _unnumbered_sub_strand(parts: dict):
+    """(name, lessons) for a row that starts a sub-strand without a number, or
+    None for a genuine spill-over row. A new sub-strand opens its outcomes with
+    "By the end of the sub-strand" and carries its own lesson count; text that
+    continues from the previous page does neither."""
+    if not parts["slo"].strip().lower().startswith("by the end of"):
+        return None
+    for lead in reversed(parts["lead"]):
+        count = LOOSE_LESSON_COUNT.search(lead)
+        name = _clean(lead[:count.start()]).rstrip(" :") if count else ""
+        if name:
+            return name, count.group(1)
+    return None
 
 
 def _strand_names(lead_texts: list[str]) -> dict[str, str]:
@@ -577,6 +637,28 @@ def parse_document_lenient(doc_dict: dict) -> list[dict]:
                 continue
             parts = _split_row(r, roles)
             parsed = _sub_strand_title(parts["lead"])
+            unnumbered = _unnumbered_sub_strand(parts) if parsed is None else None
+            if unnumbered is not None:
+                # A sub-strand the design forgot to number ("Vertebrates (16 lessons)"
+                # in Grade 5 Science): a new entry under the current strand, never
+                # merged into the sub-strand before it.
+                name, lessons = unnumbered
+                current = {
+                    "strand": current["strand"] if current else "",
+                    "sub_strand": f"{name} ({lessons} lessons)",
+                    "sub_strand_number": "",
+                    "num_lessons": lessons,
+                    "specific_learning_outcomes": parts["slo"],
+                    "suggested_learning_experiences": parts["sle"],
+                    "key_inquiry_question": parts["kiq"],
+                    "page_no": page,
+                    "assessment_methods": "",
+                    "learning_resources": "",
+                    "non_formal_activities": "",
+                    "rubric_text": "",
+                }
+                by_number[f"unnumbered:{name.lower()}"] = current
+                continue
             if parsed is None:
                 if current is not None:  # spill-over from the previous page
                     for key, field in (("slo", "specific_learning_outcomes"),
@@ -647,6 +729,46 @@ def parse_document_lenient(doc_dict: dict) -> list[dict]:
     for row in rows_out:
         del row["sub_strand_number"]
     return rows_out
+
+
+def _sub_strand_numbers(rows: list[dict]) -> set[str]:
+    numbers = set()
+    for row in rows:
+        m = SUB_STRAND_NUMBER.search(row["sub_strand"])
+        if m:
+            numbers.add(f"{m.group(1)}.{m.group(2).split('.')[0]}")
+    return numbers
+
+
+def parse_design(doc_dict: dict, filename: str):
+    """One design -> (grade, subject, curriculum rows, parser used, themes).
+
+    The strict parser reads the clean 5-column tables exactly. The lenient one
+    also follows continuation pages, merged columns and header variants, so on
+    many designs (Grade 5 Mathematics: 19 sub-strands against 4) it recovers far
+    more. It is used whenever it finds more sub-strands -- except for the
+    theme-based language designs (English, Indigenous Languages, Kiswahili),
+    whose "1.1 Listening and Speaking" skill strands only the strict parser names.
+    """
+    grade, raw_subject = extract_grade_subject(doc_dict, filename)
+    subject = canonical_subject(raw_subject)
+
+    rows = parse_curriculum_tables(doc_dict)
+    parser = "strict"
+    if not uses_theme_numbering(rows):
+        lenient = parse_document_lenient(doc_dict)
+        if len(_sub_strand_numbers(lenient)) > len(_sub_strand_numbers(rows)):
+            rows, parser = lenient, "lenient"
+    if parser == "strict":
+        attach_assessment(rows, parse_assessment_tables(doc_dict))
+        attach_rubrics(rows, parse_rubric_tables_in_order(doc_dict))
+
+    themes = extract_themes(doc_dict)
+    if themes and uses_theme_numbering(rows):
+        attach_themes(rows, themes)
+    else:
+        themes = {}
+    return grade, subject, rows, parser, themes
 
 
 def build_chunks(grade: str, subject: str, source_file: str, curriculum_rows: list[dict]) -> list[dict]:
@@ -727,26 +849,7 @@ def main():
         with open(jf, encoding="utf-8") as f:
             doc_dict = json.load(f)
 
-        grade, raw_subject = extract_grade_subject(doc_dict, jf.name)
-        subject = canonical_subject(raw_subject)
-
-        curriculum_rows = parse_curriculum_tables(doc_dict)
-        if curriculum_rows:
-            assessment_by_strand = parse_assessment_tables(doc_dict)
-            rubrics = parse_rubric_tables_in_order(doc_dict)
-            attach_assessment(curriculum_rows, assessment_by_strand)
-            attach_rubrics(curriculum_rows, rubrics)
-            parser = "strict"
-        else:
-            curriculum_rows = parse_document_lenient(doc_dict)
-            parser = "lenient"
-
-        themes = extract_themes(doc_dict)
-        if themes and uses_theme_numbering(curriculum_rows):
-            attach_themes(curriculum_rows, themes)
-        else:
-            themes = {}
-
+        grade, subject, curriculum_rows, parser, themes = parse_design(doc_dict, jf.name)
         chunks = build_chunks(grade, subject, jf.name, curriculum_rows)
         print(f"{jf.name}: {grade} / {subject} -> {len(chunks)} sub-strand chunk(s) "
               f"[{parser} parser], "

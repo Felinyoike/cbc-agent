@@ -40,3 +40,5 @@ yarn-error.log*
 
 # --- local tooling (optional) ---
 .claude/
+
+docling_json/*.json
