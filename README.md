@@ -354,8 +354,12 @@ python agent.py
   calls it "1.2 Invertebrates"), so it is stored unnumbered; Kiswahili Grade 6
   7.4.1's outcomes start at "b)" because part (a) is lost where the row breaks
   across pages. Kiswahili rubrics (strand-level "MADA: …" tables) are not attached.
-- Generation does not yet set the output language, so term plans and lessons for
-  Kiswahili and Arabic are likely to come out in English.
+- Drafts are written in the language of the curriculum evidence: Kiswahili
+  plans in Kiswahili, everything else (including the Arabic and Indigenous
+  Languages designs, which KICD writes in English) in English. Reflection
+  summaries and assistant answers follow the language the teacher writes in. The
+  summary's no-judgement filter knows the English terms and the Kiswahili rubric
+  terms (matarajio, -faulu), not every possible Kiswahili phrasing.
 - `docker-compose.yml` is empty; Postgres is started with the `docker run`
   command above.
 

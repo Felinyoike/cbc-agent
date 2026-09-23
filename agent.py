@@ -197,6 +197,16 @@ TERM_PLAN_FIELD_SOURCES = {
 }
 
 
+# KICD writes each design in the language it teaches through: the Kiswahili designs are in
+# Kiswahili, every other design (Arabic and Indigenous Languages included) in English. Drafts
+# follow the evidence's language, so a Kiswahili teacher gets a Kiswahili plan and nothing
+# is translated -- a translation would no longer be the KICD wording the draft cites.
+SAME_LANGUAGE_RULE = (
+    "- Write every field in the same language as the evidence (Kiswahili evidence gives a\n"
+    "      Kiswahili plan, English evidence an English one). Never translate it."
+)
+
+
 def generate_term_plan_content(grade: str, subject: str, strand: str, sub_strand: str,
                                evidence_by_category: dict[str, str]) -> dict[str, str]:
     """Organises ONLY the supplied KICD evidence for one sub-strand into scheme-of-work fields."""
@@ -217,6 +227,7 @@ def generate_term_plan_content(grade: str, subject: str, strand: str, sub_strand
       assessment <- [Assessment].
     - If a field's category is absent from the evidence, return an empty string for it.
       Never invent a key inquiry question.
+    {SAME_LANGUAGE_RULE}
 
     KICD EVIDENCE:
     {evidence_text}
@@ -273,6 +284,7 @@ def generate_daily_lesson_content(grade: str, subject: str, strand: str, sub_str
     - conclusion: a short closing tied to [Specific Learning Outcomes].
     - If a field's source is absent from the row, return an empty string (or an empty list for
       development) for it.
+    {SAME_LANGUAGE_RULE.replace("evidence", "row")}
 
     TERM PLAN ROW:
     {row_text}
@@ -316,6 +328,7 @@ HARD RULES:
 - If the teacher recorded little, say plainly that limited evidence was recorded and name the
   prompts left blank. Do not pad the summary or speculate about what the gaps might mean.
 - Keep it short: two to four sentences.
+- Write in the language the teacher wrote the notes in (Kiswahili notes, Kiswahili summary).
 - Plain text only: no markdown, asterisks or headings."""
 
 # The outcome decision is the teacher's alone. Any sentence using judgement language is dropped
@@ -324,7 +337,8 @@ _STATUS_LANGUAGE = re.compile(
     r"\b(achiev\w*|attain\w*|master(ed|y|ing)?|insufficient evidence|on track|"
     r"(met|meets?|meeting) (the |this |their |its )?(specific )?(learning )?(outcomes?|objectives?)|"
     r"(outcomes?|objectives?) (was|were|is|are|has been|have been) (not )?met|"
-    r"(exceeds?|meets?|approach(es|ing)?|below) expectations)\b",
+    r"(exceeds?|meets?|approach(es|ing)?|below) expectations|"
+    r"matarajio|\w*faulu\w*)\b",
     re.IGNORECASE,
 )
 
