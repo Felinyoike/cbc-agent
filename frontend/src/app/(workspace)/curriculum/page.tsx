@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Activity,
@@ -18,6 +19,7 @@ import {
   Heart,
   HelpCircle,
   Inbox,
+  Info,
   Layers,
   MapPin,
   Plus,
@@ -150,6 +152,10 @@ function CurriculumExplorer() {
     setStrand(selection.strand);
     setSubStrand(selection.subStrand);
   };
+
+  // Evidence can be browsed for any grade or subject, but only selected for the
+  // teaching context's own: the workspace (and its scheme) belongs to that context.
+  const outsideContext = grade !== context.grade || subject !== context.subject;
 
   const themeOptions = themesFor(options, grade, subject);
   const hasThemes = themeOptions.length > 0;
@@ -326,6 +332,20 @@ function CurriculumExplorer() {
           </span>
         </div>
 
+        {outsideContext && !loading && (
+          <div className="flex items-start gap-3 rounded-lg border border-info-border bg-info-soft px-4 py-3">
+            <Info className="mt-0.5 size-4 shrink-0 text-info" />
+            <p className="text-sm text-info-ink">
+              You are browsing {grade} · {subject}, but your teaching context is {context.grade} ·{" "}
+              {context.subject}. You can read this evidence, but only add evidence from your teaching context.{" "}
+              <Link href="/setup" className="font-medium underline underline-offset-2">
+                Change teaching context
+              </Link>{" "}
+              to plan with it.
+            </p>
+          </div>
+        )}
+
         {loading ? (
           <LoadingResults />
         ) : results.length === 0 ? (
@@ -351,6 +371,7 @@ function CurriculumExplorer() {
                         <Checkbox
                           checked={selected}
                           onCheckedChange={() => toggleEvidence(item)}
+                          disabled={outsideContext && !selected}
                           aria-label={`Select ${item.category}`}
                         />
                         <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium text-secondary-foreground">
@@ -383,11 +404,12 @@ function CurriculumExplorer() {
                     <Button
                       size="sm"
                       onClick={() => addEvidence(item)}
-                      disabled={selected}
+                      disabled={selected || outsideContext}
+                      title={outsideContext ? `Only ${context.grade} · ${context.subject} evidence can be added` : undefined}
                       className="h-8 gap-1.5"
                     >
                       {selected ? <Check className="size-3.5" /> : <Plus className="size-3.5" />}
-                      {selected ? "Added" : "Add to planning"}
+                      {selected ? "Added" : outsideContext ? "Other context" : "Add to planning"}
                     </Button>
                   </CardFooter>
                 </Card>
