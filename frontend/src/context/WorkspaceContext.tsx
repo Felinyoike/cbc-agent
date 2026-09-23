@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTeachingContext } from "@/context/TeachingContext";
 import {
   confirmLesson,
@@ -99,7 +99,15 @@ const WorkspaceContext = createContext<WorkspaceState | undefined>(undefined);
 
 const STORAGE_KEY = "cbc.workspace";
 
-interface PersistedShape {
+/**
+ * Everything below belongs to one teaching context. A scheme of work is per
+ * grade/subject/term/year in Postgres, and evidence, rows and lesson drafts are
+ * all built from that context's curriculum -- so they are kept per context here
+ * too. Switching context shows that context's own workspace (usually empty);
+ * switching back brings the first one back untouched, and a draft for one
+ * subject can never be saved over another subject's scheme.
+ */
+interface ContextBundle {
   selectedEvidence: EvidenceItem[];
   evidenceById: Record<string, EvidenceItem>;
   termPlanRows: TermPlanRow[];
@@ -111,9 +119,43 @@ interface PersistedShape {
   selectedTermPlanRowId: string | null;
   generatedLessonContent?: GeneratedLessonContent;
   currentLessonId: string | null;
+}
+
+const emptyBundle: ContextBundle = {
+  selectedEvidence: [],
+  evidenceById: {},
+  termPlanRows: [],
+  termPlanConfirmed: false,
+  currentSchemeId: null,
+  generatedRowContent: {},
+  lessonPlan: emptyLessonPlan,
+  lessonPlanConfirmed: false,
+  selectedTermPlanRowId: null,
+  generatedLessonContent: undefined,
+  currentLessonId: null,
+};
+
+/** The class/stream is deliberately left out: it does not change which curriculum applies. */
+function contextKeyOf(teaching: { grade: string; subject: string; term: string; year: string }) {
+  return `${teaching.grade}|${teaching.subject}|${teaching.term}|${teaching.year}`;
+}
+
+/** A workspace only holds evidence from its own grade and subject's curriculum design. */
+export function evidenceFitsContext(item: EvidenceItem, teaching: { grade: string; subject: string }) {
+  return item.grade === teaching.grade && item.subject === teaching.subject;
+}
+
+interface PersistedShape {
+  version: 2;
+  /** Keyed by contextKeyOf(). The current context's bundle is written on every change. */
+  contexts: Record<string, ContextBundle>;
+  /** Not context-specific (still prototype data). */
   reflections: ReflectionRecord[];
   lessons: Lesson[];
 }
+
+/** Workspaces saved before contexts existed: one unlabelled bundle, adopted by the context in use. */
+type LegacyPersistedShape = Partial<ContextBundle> & { reflections?: ReflectionRecord[]; lessons?: Lesson[] };
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const teaching = useTeachingContext();
@@ -133,53 +175,99 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [contextWarning, setContextWarning] = useState<string | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
 
+  // Every context except the one in use. The current one lives in the state
+  // above, and is folded back in when the context changes or on every save.
+  const [otherContexts, setOtherContexts] = useState<Record<string, ContextBundle>>({});
+  const contextKey = contextKeyOf(teaching);
+  // Read inside effects, which must act on the context the state belongs to
+  // rather than the one a later render has moved on to.
+  const loadedContextKey = useRef(contextKey);
+
+  const currentBundle = useCallback(
+    (): ContextBundle => ({
+      selectedEvidence,
+      evidenceById,
+      termPlanRows,
+      termPlanConfirmed,
+      currentSchemeId,
+      generatedRowContent,
+      lessonPlan,
+      lessonPlanConfirmed,
+      selectedTermPlanRowId,
+      generatedLessonContent,
+      currentLessonId,
+    }),
+    [selectedEvidence, evidenceById, termPlanRows, termPlanConfirmed, currentSchemeId, generatedRowContent,
+     lessonPlan, lessonPlanConfirmed, selectedTermPlanRowId, generatedLessonContent, currentLessonId]
+  );
+
+  const applyBundle = useCallback((bundle: ContextBundle, key: string) => {
+    const [grade, subject] = key.split("|");
+    // Workspaces saved before selection was limited to the context can hold other
+    // grades' or subjects' evidence; drop it from the selection. evidenceById is
+    // left whole so rows that already cite such an item still resolve it.
+    setSelectedEvidence(bundle.selectedEvidence.filter((item) => evidenceFitsContext(item, { grade, subject })));
+    setEvidenceById(bundle.evidenceById);
+    // Rows saved before keyInquiryQuestion existed would otherwise crash string handling.
+    setTermPlanRows(bundle.termPlanRows.map((row) => ({ ...row, keyInquiryQuestion: row.keyInquiryQuestion ?? "" })));
+    setTermPlanConfirmed(bundle.termPlanConfirmed);
+    setCurrentSchemeId(bundle.currentSchemeId);
+    setGeneratedRowContent(bundle.generatedRowContent);
+    setLessonPlan(bundle.lessonPlan);
+    setLessonPlanConfirmed(bundle.lessonPlanConfirmed);
+    setSelectedTermPlanRowId(bundle.selectedTermPlanRowId);
+    setGeneratedLessonContent(bundle.generatedLessonContent);
+    setCurrentLessonId(bundle.currentLessonId);
+  }, []);
+
   useEffect(() => {
+    // Waits for the saved teaching context: hydrating before it is known would
+    // file the stored workspace under the default context instead of the real one.
+    if (!teaching.isLoaded || isLoaded) return;
     try {
       const saved = window.localStorage.getItem(STORAGE_KEY);
       if (saved) {
-        const parsed = JSON.parse(saved) as Partial<PersistedShape>;
+        const parsed = JSON.parse(saved) as PersistedShape | LegacyPersistedShape;
+        const contexts =
+          "version" in parsed && parsed.version === 2
+            ? parsed.contexts ?? {}
+            : { [contextKey]: { ...emptyBundle, ...(parsed as LegacyPersistedShape) } };
+        const { [contextKey]: mine, ...others } = contexts;
         // Hydrating from localStorage has to happen after mount, otherwise the
         // server-rendered markup and the first client render disagree.
-        /* eslint-disable react-hooks/set-state-in-effect */
-        if (parsed.selectedEvidence) setSelectedEvidence(parsed.selectedEvidence);
-        if (parsed.evidenceById) setEvidenceById(parsed.evidenceById);
-        if (parsed.termPlanRows) {
-          // Rows saved before keyInquiryQuestion existed would otherwise crash string handling.
-          setTermPlanRows(parsed.termPlanRows.map((row) => ({ ...row, keyInquiryQuestion: row.keyInquiryQuestion ?? "" })));
-        }
-        if (parsed.termPlanConfirmed !== undefined) setTermPlanConfirmed(parsed.termPlanConfirmed);
-        if (parsed.currentSchemeId !== undefined) setCurrentSchemeId(parsed.currentSchemeId);
-        if (parsed.generatedRowContent) setGeneratedRowContent(parsed.generatedRowContent);
-        if (parsed.lessonPlan) setLessonPlan(parsed.lessonPlan);
-        if (parsed.lessonPlanConfirmed !== undefined) setLessonPlanConfirmed(parsed.lessonPlanConfirmed);
-        if (parsed.selectedTermPlanRowId !== undefined) setSelectedTermPlanRowId(parsed.selectedTermPlanRowId);
-        if (parsed.generatedLessonContent) setGeneratedLessonContent(parsed.generatedLessonContent);
-        if (parsed.currentLessonId !== undefined) setCurrentLessonId(parsed.currentLessonId);
+        setOtherContexts(others);
+        if (mine) applyBundle({ ...emptyBundle, ...mine }, contextKey);
         if (parsed.reflections) setReflections(parsed.reflections);
         if (parsed.lessons) setLessons(parsed.lessons);
-        /* eslint-enable react-hooks/set-state-in-effect */
       }
     } catch {
       // Ignore corrupt storage and start from the seeded prototype data.
     }
+    loadedContextKey.current = contextKey;
     setIsLoaded(true);
-  }, []);
+  }, [teaching.isLoaded, isLoaded, contextKey, applyBundle]);
+
+  useEffect(() => {
+    if (!isLoaded || loadedContextKey.current === contextKey) return;
+    // The teacher switched context: keep this context's work under its own key
+    // and show the new context's workspace, which is usually empty.
+    const previousKey = loadedContextKey.current;
+    const previousBundle = currentBundle();
+    loadedContextKey.current = contextKey;
+    setOtherContexts((prev) => {
+      const rest = { ...prev };
+      delete rest[contextKey];  // it is the one now held in state
+      return { ...rest, [previousKey]: previousBundle };
+    });
+    applyBundle({ ...emptyBundle, ...otherContexts[contextKey] }, contextKey);
+  }, [isLoaded, contextKey, currentBundle, applyBundle, otherContexts]);
 
   useEffect(() => {
     if (!isLoaded) return;
     try {
       const payload: PersistedShape = {
-        selectedEvidence,
-        evidenceById,
-        termPlanRows,
-        termPlanConfirmed,
-        currentSchemeId,
-        generatedRowContent,
-        lessonPlan,
-        lessonPlanConfirmed,
-        selectedTermPlanRowId,
-        generatedLessonContent,
-        currentLessonId,
+        version: 2,
+        contexts: { ...otherContexts, [loadedContextKey.current]: currentBundle() },
         reflections,
         lessons,
       };
@@ -187,22 +275,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     } catch {
       // Storage unavailable — the session continues in memory only.
     }
-  }, [
-    isLoaded,
-    selectedEvidence,
-    evidenceById,
-    termPlanRows,
-    termPlanConfirmed,
-    currentSchemeId,
-    generatedRowContent,
-    lessonPlan,
-    lessonPlanConfirmed,
-    selectedTermPlanRowId,
-    generatedLessonContent,
-    currentLessonId,
-    reflections,
-    lessons,
-  ]);
+    // currentBundle changes whenever any field in it changes, so the individual
+    // fields do not need listing here.
+  }, [isLoaded, otherContexts, currentBundle, reflections, lessons]);
 
   const isSelected = useCallback(
     (id: string) => selectedEvidence.some((item) => item.id === id),
@@ -213,12 +288,20 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setEvidenceById((prev) => (prev[item.id] === item ? prev : { ...prev, [item.id]: item }));
   }, []);
 
+  // Enforced here rather than only in the Explorer: another grade's or subject's
+  // evidence would end up in this context's term plan and scheme of work.
+  const fitsContext = useCallback(
+    (item: EvidenceItem) => evidenceFitsContext(item, teaching),
+    [teaching]
+  );
+
   const addEvidence = useCallback(
     (item: EvidenceItem) => {
+      if (!fitsContext(item)) return;
       rememberEvidence(item);
       setSelectedEvidence((prev) => (prev.some((e) => e.id === item.id) ? prev : [...prev, item]));
     },
-    [rememberEvidence]
+    [rememberEvidence, fitsContext]
   );
 
   const removeEvidence = useCallback((id: string) => {
@@ -227,12 +310,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const toggleEvidence = useCallback(
     (item: EvidenceItem) => {
+      // Deselecting is always allowed; selecting only within the teaching context.
+      if (!selectedEvidence.some((e) => e.id === item.id) && !fitsContext(item)) return;
       rememberEvidence(item);
       setSelectedEvidence((prev) =>
         prev.some((e) => e.id === item.id) ? prev.filter((e) => e.id !== item.id) : [...prev, item]
       );
     },
-    [rememberEvidence]
+    [rememberEvidence, fitsContext, selectedEvidence]
   );
 
   const clearEvidence = useCallback(() => setSelectedEvidence([]), []);

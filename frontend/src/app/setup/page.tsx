@@ -90,11 +90,11 @@ function SetupForm() {
 
   const handleContinue = () => {
     context.setContext(draft, { markConfigured: true });
-    // Changing grade or subject invalidates evidence and drafts gathered under
-    // the previous context — warn rather than silently discarding them.
+    // Each context keeps its own evidence and drafts, so nothing is lost — but
+    // say where the previous context's work went, since this one starts empty.
     setContextWarning(
       changesScope && hasWork
-        ? `You changed the teaching context to ${draft.grade} · ${draft.subject}. Curriculum evidence and drafts collected under the previous context may no longer apply — review them before confirming anything.`
+        ? `You are now working in ${draft.grade} · ${draft.subject}, which has its own workspace. The evidence and drafts you collected under ${context.grade} · ${context.subject} are kept with that context and come back when you switch to it.`
         : null
     );
     router.push("/dashboard");
@@ -256,8 +256,8 @@ function SetupForm() {
             <div className="flex items-start gap-2.5 rounded-lg border border-draft-border bg-draft-surface p-4">
               <Info className="mt-0.5 size-4 shrink-0 text-draft-strong" />
               <p className="text-xs leading-relaxed text-draft-text">
-                Changing grade or subject means the evidence and drafts you already collected may no longer
-                apply. They will be kept, but flagged for review.
+                Each grade and subject has its own workspace. Your current evidence and drafts stay with{" "}
+                {context.grade} · {context.subject}, and the context you are switching to starts with its own.
               </p>
             </div>
           )}
