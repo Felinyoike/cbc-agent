@@ -277,6 +277,13 @@ Bedrock configuration variables: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
   summary.
 - **Plain text:** assistant answers and reflection summaries pass through
   `backend/plain_text.py`, which strips markdown the model still produces.
+- **Busy provider:** when the model is overloaded (Gemini's "503 UNAVAILABLE …
+  high demand", Bedrock's ServiceUnavailableException), the call is retried after
+  2, 5 and 10 seconds (`backend/retry.py`). This covers generation, the planning
+  assistant and embeddings (search and ingest). Other errors, such as a bad key or
+  a quota limit, fail at once. If the service is still busy after four attempts,
+  the endpoint returns 502 with "The AI service is busy right now … Please try
+  again in a minute."
 - **Failures:** generation endpoints return 502 with the reason; nothing is
   silently replaced with placeholder text.
 

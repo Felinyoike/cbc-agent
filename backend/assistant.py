@@ -11,6 +11,7 @@ from strands import Agent, tool
 from strands.models.gemini import GeminiModel
 
 from backend.plain_text import to_plain_text
+from backend.retry import retry_transient
 from backend.search import SearchFailed, search_evidence
 
 log = logging.getLogger("backend.assistant")
@@ -106,10 +107,14 @@ def ask_assistant(prompt: str, grade: str, subject: str, evidence: list[dict]) -
     """Returns {"answer": str, "toolCalls": [tool names in call order]}."""
     # A fresh Agent per request, sharing one model: an Agent keeps its message history and
     # rejects concurrent invocations, so a single shared one would mix every teacher's
-    # questions into one conversation and fail under simultaneous requests.
-    agent = Agent(model=assistant_model, system_prompt=ASSISTANT_PERSONA,
-                  tools=[search_curriculum], callback_handler=None)
-    result = agent(_build_input(prompt, grade, subject, evidence))
+    # questions into one conversation and fail under simultaneous requests. For the same
+    # reason each retry gets a new one: a failed attempt can leave a half-finished turn behind.
+    def attempt():
+        fresh = Agent(model=assistant_model, system_prompt=ASSISTANT_PERSONA,
+                      tools=[search_curriculum], callback_handler=None)
+        return fresh, fresh(_build_input(prompt, grade, subject, evidence))
+
+    agent, result = retry_transient(attempt, what="planning assistant")
 
     tool_calls = [
         block["toolUse"]["name"]

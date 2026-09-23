@@ -3,6 +3,8 @@ from chromadb import Documents, EmbeddingFunction, Embeddings
 from google import genai
 from google.genai import types
 
+from backend.retry import retry_transient
+
 class GeminiEmbeddingFunction(EmbeddingFunction):
     def __init__(self, api_key: str = None, model_name: str = "gemini-embedding-2"):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
@@ -19,9 +21,10 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
         contents = [types.Content(parts=[types.Part(text=t)]) for t in input]
         
         # Generate embeddings for the list of text chunks
-        response = self.client.models.embed_content(
-            model=self.model_name,
-            contents=contents,
+        # Semantic search, the assistant's curriculum search and ingest all embed here.
+        response = retry_transient(
+            lambda: self.client.models.embed_content(model=self.model_name, contents=contents),
+            what="embedding",
         )
         
         # Extract the float arrays from the response objects

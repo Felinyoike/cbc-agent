@@ -9,6 +9,7 @@ from strands import Agent
 from strands.models.gemini import GeminiModel
 
 from backend.plain_text import to_plain_text
+from backend.retry import retry_transient
 from bedrock_embedding import BedrockEmbeddingFunction
 from gemini_embedding import GeminiEmbeddingFunction
 from models import DailyLessonContent, LessonPlan, SchemeOfWork, TermPlanContent
@@ -92,6 +93,12 @@ else:
 
 
 def _structured_output(output_model, system_instruction: str, contents: str):
+    # Each attempt starts from scratch, so a retry never inherits a failed call's state.
+    return retry_transient(lambda: _structured_output_once(output_model, system_instruction, contents),
+                           what=f"{output_model.__name__} generation")
+
+
+def _structured_output_once(output_model, system_instruction: str, contents: str):
     if use_bedrock:
         json_system_prompt = f"""{system_instruction}
 
@@ -328,7 +335,8 @@ HARD RULES:
 - If the teacher recorded little, say plainly that limited evidence was recorded and name the
   prompts left blank. Do not pad the summary or speculate about what the gaps might mean.
 - Keep it short: two to four sentences.
-- Write in the language the teacher wrote the notes in (Kiswahili notes, Kiswahili summary).
+- Write in the same language as the teacher's notes. Notes in English get an English summary;
+  only notes written in Kiswahili get a Kiswahili summary.
 - Plain text only: no markdown, asterisks or headings."""
 
 # The outcome decision is the teacher's alone. Any sentence using judgement language is dropped
@@ -360,7 +368,16 @@ def generate_reflection_summary(evidence: dict[str, str]) -> str:
     )
 
     request = f"Summarise these reflection notes for the teacher.\n\n{notes_text}"
+    raw_summary = retry_transient(lambda: _summarise_once(request), what="reflection summary")
 
+    # Applied whichever provider answered: the achievement-language rule is never provider-specific.
+    summary = _drop_status_sentences(to_plain_text(raw_summary))
+    if not summary:
+        raise RuntimeError("Every sentence of the summary judged the outcome, so none of it was kept.")
+    return summary
+
+
+def _summarise_once(request: str) -> str:
     if use_bedrock:
         # Plain-text counterpart of _structured_output's Bedrock path: the persona is the system
         # prompt and the text comes back as-is, with no JSON schema wrapping.
@@ -370,17 +387,10 @@ def generate_reflection_summary(evidence: dict[str, str]) -> str:
             system=[{"text": REFLECTION_SUMMARY_PERSONA}],
             inferenceConfig={"temperature": 0.2, "maxTokens": 1024},
         )
-        raw_summary = response["output"]["message"]["content"][0]["text"]
-    else:
-        # A fresh tool-free Agent per call on the shared model, like the other generation functions.
-        agent = Agent(model=gemini_model, system_prompt=REFLECTION_SUMMARY_PERSONA, callback_handler=None)
-        raw_summary = str(agent(request))
-
-    # Applied whichever provider answered: the achievement-language rule is never provider-specific.
-    summary = _drop_status_sentences(to_plain_text(raw_summary))
-    if not summary:
-        raise RuntimeError("Every sentence of the summary judged the outcome, so none of it was kept.")
-    return summary
+        return response["output"]["message"]["content"][0]["text"]
+    # A fresh tool-free Agent per call on the shared model, like the other generation functions.
+    agent = Agent(model=gemini_model, system_prompt=REFLECTION_SUMMARY_PERSONA, callback_handler=None)
+    return str(agent(request))
 
 
 
